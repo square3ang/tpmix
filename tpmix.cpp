@@ -294,15 +294,23 @@ public:
         enqueue(exec);
     };
 
-    void enqueue(bool exec = true){
+    void saveDeviceDefault(){
+        buf[5] = 0x11 ;
+        buf[6] = 0x06;
+        write32BE(&buf[7], 1);
+        enqueue(true, false);
+    };
+
+    void enqueue(bool exec = true, bool toSave = true){
         int res = 0;
         // TODO queue
         printBuf8(buf, 16, ">> ");
         if (NULL != handle && exec){
             res = hid_write(handle, buf, 16);
         }
-
-        settings[read16BE(&buf[5])] = read32BE(&buf[7]);
+        if (toSave){
+            settings[read16BE(&buf[5])] = read32BE(&buf[7]);
+        }
         (void)res;
     };
 
@@ -336,7 +344,7 @@ enum
 {
     ID_LOAD         = 0x0001,
     ID_SAVE         = 0x0010,
-    ID_SAVE_DEVICE  = 0x0020,
+    ID_DEVICE_SAVE  = 0x0020,
     
     ID_INPUT_GAIN       = 0x220,
     ID_INPUT_48V        = 0x240,
@@ -1052,8 +1060,10 @@ protected:
     
     void OnLoad(wxCommandEvent& event);
     void OnSave(wxCommandEvent& event);
+    void OnDeviceSave(wxCommandEvent& event);
     void OnExit(wxCommandEvent& event);
     void OnAbout(wxCommandEvent& event);
+    
     void OnUpdateLevels(wxCommandEvent& evt);
     void OnClose(wxCloseEvent& event);
     
@@ -1079,6 +1089,7 @@ protected:
 wxBEGIN_EVENT_TABLE(TPMixer, wxFrame)
     EVT_MENU(ID_SAVE , TPMixer::OnSave)
     EVT_MENU(ID_LOAD , TPMixer::OnLoad)
+    EVT_MENU(ID_DEVICE_SAVE , TPMixer::OnDeviceSave)
     EVT_MENU(wxID_ABOUT , TPMixer::OnAbout)
     EVT_MENU(wxID_EXIT  , TPMixer::OnExit )
     
@@ -1506,18 +1517,22 @@ TPMixer::TPMixer()
     : wxFrame(nullptr, wxID_ANY, "Topping E4X4 Mixer")
 {
 #if 1
-    wxMenu *menuFile = new wxMenu;
-    wxMenu *menuHelp = new wxMenu;
+    wxMenu *menuFile    = new wxMenu;
+    wxMenu *menuHelp    = new wxMenu;
+    wxMenu *menuDevice  = new wxMenu;
     
     menuFile->Append(ID_SAVE, "&Save Status\tCtrl-S");
     menuFile->Append(ID_LOAD, "&Load Status\tCtrl-L");
     menuFile->AppendSeparator();
     menuFile->Append(wxID_EXIT);
+    
+    menuDevice->Append(ID_DEVICE_SAVE, "&Save Defaults");
  
     menuHelp->Append(wxID_ABOUT, "About\tF1");
     
     wxMenuBar *menuBar = new wxMenuBar;
     menuBar->Append(menuFile, "&File");
+    menuBar->Append(menuDevice, "&Device");
     menuBar->Append(menuHelp, "&Help");
     SetMenuBar( menuBar );
 #endif
@@ -1960,6 +1975,11 @@ void TPMixer::OnLoad(wxCommandEvent& event)
 void TPMixer::OnSave(wxCommandEvent& event)
 {
     saveSettings();
+}
+
+void TPMixer::OnDeviceSave(wxCommandEvent& event)
+{
+    hid->saveDeviceDefault();
 }
  
 void TPMixer::OnAbout(wxCommandEvent& event)
