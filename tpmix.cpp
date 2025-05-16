@@ -334,6 +334,10 @@ wxIMPLEMENT_APP(MyApp);
 // wx ID range <= 32767
 enum
 {
+    ID_LOAD         = 0x0001,
+    ID_SAVE         = 0x0010,
+    ID_SAVE_DEVICE  = 0x0020,
+    
     ID_INPUT_GAIN       = 0x220,
     ID_INPUT_48V        = 0x240,
     ID_INPUT_MON        = 0x250,
@@ -1046,7 +1050,8 @@ protected:
     void refreshLoopbackUi();
     void refreshOutputUi();
     
-    void OnHello(wxCommandEvent& event);
+    void OnLoad(wxCommandEvent& event);
+    void OnSave(wxCommandEvent& event);
     void OnExit(wxCommandEvent& event);
     void OnAbout(wxCommandEvent& event);
     void OnUpdateLevels(wxCommandEvent& evt);
@@ -1072,8 +1077,11 @@ protected:
 
 // TODO 
 wxBEGIN_EVENT_TABLE(TPMixer, wxFrame)
+    EVT_MENU(ID_SAVE , TPMixer::OnSave)
+    EVT_MENU(ID_LOAD , TPMixer::OnLoad)
     EVT_MENU(wxID_ABOUT , TPMixer::OnAbout)
     EVT_MENU(wxID_EXIT  , TPMixer::OnExit )
+    
     EVT_CLOSE(TPMixer::OnClose)
     EVT_SIZE(TPMixer::OnSize)
 
@@ -1497,13 +1505,16 @@ bool MyApp::OnInit()
 TPMixer::TPMixer()
     : wxFrame(nullptr, wxID_ANY, "Topping E4X4 Mixer")
 {
-#if 0
+#if 1
     wxMenu *menuFile = new wxMenu;
+    wxMenu *menuHelp = new wxMenu;
+    
+    menuFile->Append(ID_SAVE, "&Save Status\tCtrl-S");
+    menuFile->Append(ID_LOAD, "&Load Status\tCtrl-L");
     menuFile->AppendSeparator();
     menuFile->Append(wxID_EXIT);
  
-    wxMenu *menuHelp = new wxMenu;
-    menuHelp->Append(wxID_ABOUT);
+    menuHelp->Append(wxID_ABOUT, "About\tF1");
     
     wxMenuBar *menuBar = new wxMenuBar;
     menuBar->Append(menuFile, "&File");
@@ -1939,6 +1950,16 @@ void TPMixer::OnClose(wxCloseEvent& event)
     //printf("veto?\n");
     //event.Veto();
     event.Skip();
+}
+ 
+void TPMixer::OnLoad(wxCommandEvent& event)
+{
+    loadSettings();
+}
+ 
+void TPMixer::OnSave(wxCommandEvent& event)
+{
+    saveSettings();
 }
  
 void TPMixer::OnAbout(wxCommandEvent& event)
