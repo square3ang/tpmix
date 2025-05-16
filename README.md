@@ -108,7 +108,7 @@ Example:
 ## Known issues:
 
 1. **segmentation fault** when exit, due to unknown string free violation of `PanelOutputs` class. wxWidgets related
-2. **Mute** is saved, so Gain/Volume is not saved if muted.
+2. **Mute** is saved, but Gain/Volume is not saved if muted.
 3. **Solo** status is not saved. because Solo is actually muting other channels.
 4. udev rules for hidraw does not support VID:PID, so, manually chmod/chown the hidraw device, or assign your group for all hidraw dev (kind of unsafe)
 
