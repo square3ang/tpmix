@@ -19,17 +19,18 @@ tpmix is a GUI Control Program for Topping Audio Interfaces' Mixer, for Linux, m
 - Status auto save and load, in ~/.config/toppingmixer/toppingmixer.settings
 - All level meters. Inputs, Playbacks, Loopbacks input and output, Outputs input and output
 - Gain step can be finer than 1dB, it's digital, (linearly) can be almost any value between (-64.0,-64.0)
+- manual load/save, and save to device
 
 ### Works not
 
-- Restoring 48V phantom power, for device safety reason. Code commented out
+- Restoring 48V phantom power. For device safety reason, code commented out
 - Save/load Solo switches. See toppingmixer.settings and below
 
 ### TODOs
 
 - Peak indicator for all level meters
-- Add manual load/save, and save to device
 - Reset timer for level meter, the device stops updating if signal lower than -96dBfs
+- push all saved status to the device
 
 
 ## Design
@@ -111,6 +112,7 @@ Example:
 2. **Mute** is saved, but Gain/Volume is not saved if muted.
 3. **Solo** status is not saved. because Solo is actually muting other channels.
 4. udev rules for hidraw does not support VID:PID, so, manually chmod/chown the hidraw device, or assign your group for all hidraw dev (kind of unsafe)
+5. Not really an issue, if HID device open failed, there will be a demo mode, just some flashing level meters, and pan/gain/volume will be remembered.
 
 ## License
 
