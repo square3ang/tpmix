@@ -523,7 +523,7 @@ public:
     wxButton   *lbPeaksI[N_INPUTS];
     int32_t PeaksI[N_INPUTS];
 
-    PanelInputs(wxWindow *parent, int32_t activeInputs = 4) : wxPanel(parent, wxID_ANY), activeInputs(activeInputs){
+    PanelInputs(wxWindow *parent, int32_t activeInputs = 4, uint16_t pid = 0x8754) : wxPanel(parent, wxID_ANY), activeInputs(activeInputs){
         const auto MARGIN = FromDIP(8);
 
         for (size_t i = 0; i < N_INPUTS ; i++){
@@ -558,7 +558,11 @@ public:
             lbPeaksI[iCh]->SetWindowStyle(wxALIGN_RIGHT);
             if (iCh < activeInputs) {
                 sizer->Add(lbPeaksI[iCh], wxGBPosition(1, iCh*3), wxGBSpan(1, 1), wxALIGN_CENTER);
-                sizer->Add(lbGainI[iCh], wxGBPosition(1, iCh*3 + 1), wxGBSpan(1, 1), wxALIGN_CENTER);
+                if (pid == 0x8754) {
+                    sizer->Add(lbGainI[iCh], wxGBPosition(1, iCh*3 + 1), wxGBSpan(1, 1), wxALIGN_CENTER);
+                } else {
+                    lbGainI[iCh]->Hide();
+                }
             } else {
                 lbPeaksI[iCh]->Hide();
                 lbGainI[iCh]->Hide();
@@ -584,13 +588,28 @@ public:
             } else  {
                 sizerButtons->Add(new wxStaticText(buttonPanel, wxID_ANY, "")   , wxEXPAND); // spacer
             }
-            sizerButtons->Add(cbSolo [i] = new wxToggleButton(buttonPanel,  ID_INPUT_SOLO  + i, "SOLO") , wxEXPAND);
-            sizerButtons->Add(cbMute [i] = new wxToggleButton(buttonPanel,  ID_INPUT_MUTE  + i, "MUTE") , wxEXPAND);
-            sizerButtons->Add(cbPhase[i] = new wxToggleButton(buttonPanel,  ID_INPUT_PHASE + i, "PHASE"), wxEXPAND);
+            
+            cbSolo [i] = new wxToggleButton(buttonPanel,  ID_INPUT_SOLO  + i, "SOLO");
+            cbMute [i] = new wxToggleButton(buttonPanel,  ID_INPUT_MUTE  + i, "MUTE");
+            cbPhase[i] = new wxToggleButton(buttonPanel,  ID_INPUT_PHASE + i, "PHASE");
+
+            if (pid == 0x8754) {
+                sizerButtons->Add(cbSolo [i], wxEXPAND);
+                sizerButtons->Add(cbMute [i], wxEXPAND);
+                sizerButtons->Add(cbPhase[i], wxEXPAND);
+            } else {
+                cbSolo[i]->Hide();
+                cbMute[i]->Hide();
+                cbPhase[i]->Hide();
+            }
             
             if (i < activeInputs) {
                 sizer->Add(gaLevels[i], wxGBPosition(2, i*3), wxGBSpan(1, 1), wxEXPAND);
-                sizer->Add(slGainI[i], wxGBPosition(2, i*3+1), wxGBSpan(1, 1), wxEXPAND);
+                if (pid == 0x8754) {
+                    sizer->Add(slGainI[i], wxGBPosition(2, i*3+1), wxGBSpan(1, 1), wxEXPAND);
+                } else {
+                    slGainI[i]->Hide();
+                }
                 sizer->Add(buttonPanel, wxGBPosition(2, i*3+2), wxGBSpan(1, 1), wxALIGN_TOP);
             } else {
                 gaLevels[i]->Hide();
@@ -645,7 +664,7 @@ public:
         wxString("Playback7+8"),
     };
 
-    PanelMixers(wxWindow *parent) : wxPanel(parent, wxID_ANY){
+    PanelMixers(wxWindow *parent, uint16_t pid = 0x8754) : wxPanel(parent, wxID_ANY){
         const auto MARGIN = FromDIP(8);
         const auto COLS = 5+1;
         auto sizer = new wxGridBagSizer(MARGIN, MARGIN);
@@ -729,8 +748,13 @@ public:
             sizer->Add(ckMute[b] , wxGBPosition(row    , i*COLS+3), wxGBSpan(1, 2), wxRIGHT);
             sizer->Add(ckSolo[a] , wxGBPosition(row + 1, i*COLS+0), wxGBSpan(1, 2), wxCENTER);
             sizer->Add(ckSolo[b] , wxGBPosition(row + 1, i*COLS+3), wxGBSpan(1, 2), wxCENTER);
-            sizer->Add(ckPhase[a], wxGBPosition(row + 2, i*COLS+0), wxGBSpan(1, 2), wxCENTER);
-            sizer->Add(ckPhase[b], wxGBPosition(row + 2, i*COLS+3), wxGBSpan(1, 2), wxCENTER);
+            if (pid == 0x8754) {
+                sizer->Add(ckPhase[a], wxGBPosition(row + 2, i*COLS+0), wxGBSpan(1, 2), wxCENTER);
+                sizer->Add(ckPhase[b], wxGBPosition(row + 2, i*COLS+3), wxGBSpan(1, 2), wxCENTER);
+            } else {
+                ckPhase[a]->Hide();
+                ckPhase[b]->Hide();
+            }
         }
         //spacer
         for (size_t i = 1; i < N_MIX_SRCS / 2; i++){
@@ -1798,8 +1822,8 @@ TPMixer::TPMixer()
 
     auto book = new wxNotebook(this, wxID_ANY);
    
-    panelInputs = new PanelInputs(book, hid->numInputs);
-    panelMixers = new PanelMixers(book);
+    panelInputs = new PanelInputs(book, hid->numInputs, hid->pid);
+    panelMixers = new PanelMixers(book, hid->pid);
     panelLoopbacks = new PanelLoopbacks(book);
     panelOutputs = new PanelOutputs(book, hid->pid);
     panelPhones = new PanelPhones(book);
