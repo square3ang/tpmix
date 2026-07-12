@@ -853,12 +853,11 @@ public:
         SetSizer(sizer);
     };
 }; // PanelLoopbacks
-
 class PanelOutputs : public wxPanel
 {
 public:
     const static int32_t N_OUTPUTS = 2; 
-    wxStaticText    *lbTitle        [N_OUTPUTS];
+    wxStaticText    *lbTitle        [3];
     wxComboBox      *cbSelect       [N_OUTPUTS];
     wxGauge         *gaLevelsI      [N_OUTPUTS * 2];
     wxGauge         *gaLevelsO      [N_OUTPUTS * 2];
@@ -894,27 +893,50 @@ public:
         wxString("MIX C"),
         wxString("MIX D"),
     };
-    PanelOutputs(wxWindow *parent) : wxPanel(parent, wxID_ANY){
+    PanelOutputs(wxWindow *parent, uint16_t pid = 0x8754) : wxPanel(parent, wxID_ANY){
         const auto MARGIN = FromDIP(8);
         auto sizer = new wxGridBagSizer(MARGIN, MARGIN);
         const int32_t COLS = 7+1;
         SetWindowStyle(wxBORDER_SUNKEN);
 
-        for (size_t i = 0; i < N_OUTPUTS ; i++){
-            lbTitle[i] = new wxStaticText(this, wxID_ANY, wxString(std::format("Output{}", i + 1)));
-            lbTitle[i]->SetWindowStyle(wxALIGN_CENTER);
-            wxFont font = lbTitle[i]->GetFont();
-            lbTitle[i]->SetFont(font.Larger().Larger());
+        bool isOTG = (pid == 0x8755 || pid == 0x8756);
+        bool isE2x2 = (pid == 0x8752);
+        bool isE4x4 = (pid == 0x8754);
 
-            sizer->Add(lbTitle[i], wxGBPosition(0, i * COLS), wxGBSpan(1, COLS - 1), wxALIGN_CENTER);
+        // 1. Titles
+        if (isE4x4) {
+            lbTitle[0] = new wxStaticText(this, wxID_ANY, "Output1");
+            lbTitle[1] = new wxStaticText(this, wxID_ANY, "Output2");
+        } else if (isOTG) {
+            lbTitle[0] = new wxStaticText(this, wxID_ANY, "Output 1+2");
+            lbTitle[1] = new wxStaticText(this, wxID_ANY, "Mobile OUT");
+        } else { // E2x2 non-OTG
+            lbTitle[0] = new wxStaticText(this, wxID_ANY, "Output 1+2");
+            lbTitle[1] = new wxStaticText(this, wxID_ANY, "Unused");
         }
 
+        for (size_t i = 0; i < 2; ++i) {
+            lbTitle[i]->SetWindowStyle(wxALIGN_CENTER);
+            lbTitle[i]->SetFont(lbTitle[i]->GetFont().Larger().Larger());
+        }
+
+        // Add titles to sizer
+        sizer->Add(lbTitle[0], wxGBPosition(0, 0 * COLS), wxGBSpan(1, COLS - 1), wxALIGN_CENTER);
+        if (!isE2x2) {
+            sizer->Add(lbTitle[1], wxGBPosition(0, 1 * COLS), wxGBSpan(1, COLS - 1), wxALIGN_CENTER);
+        }
+
+        // 2. Combo Boxes (cbSelect)
         for (size_t i = 0; i < N_OUTPUTS ; i++){
             cbSelect[i] = new wxComboBox (this, ID_OUTPUT_SEL + i, OutputSels[10+i], wxDefaultPosition, wxDefaultSize, 14, OutputSels, wxCB_READONLY);
-            // cbSelect[i]->SetHint("Select Output Source");
-            sizer->Add(cbSelect[i], wxGBPosition(1, i*COLS), wxGBSpan(1, COLS - 1), wxALIGN_CENTER);
+            if (i == 0 || (i == 1 && isOTG) || (i == 1 && isE4x4)) {
+                sizer->Add(cbSelect[i], wxGBPosition(1, i * COLS), wxGBSpan(1, COLS - 1), wxALIGN_CENTER);
+            } else {
+                cbSelect[i]->Hide();
+            }
         }
 
+        // 3. Gauges & Sliders
         for (size_t i = 0; i < N_OUTPUTS ; i++){
             int32_t l = i * 2;
             int32_t r = l + 1;
@@ -940,25 +962,62 @@ public:
             //slOutputB[i]->SetTickFreq(6);
             slOutputR[i]->SetTickFreq(6);
             
-            sizer->Add(slOutputL[i], wxGBPosition(2, i*COLS+2), wxGBSpan(1, 1), wxEXPAND);
-            sizer->Add(slOutputR[i], wxGBPosition(2, i*COLS+4), wxGBSpan(1, 1), wxEXPAND);
-            sizer->Add(slOutputB[i], wxGBPosition(2, i*COLS+3), wxGBSpan(1, 1), wxEXPAND);
-            sizer->Add(gaLevelsI[l], wxGBPosition(2, i*COLS+0), wxGBSpan(1, 1), wxEXPAND);
-            sizer->Add(gaLevelsI[r], wxGBPosition(2, i*COLS+6), wxGBSpan(1, 1), wxEXPAND);
-            sizer->Add(gaLevelsO[l], wxGBPosition(2, i*COLS+1), wxGBSpan(1, 1), wxEXPAND);
-            sizer->Add(gaLevelsO[r], wxGBPosition(2, i*COLS+5), wxGBSpan(1, 1), wxEXPAND);
+            if (i == 0 || (i == 1 && isOTG) || (i == 1 && isE4x4)) {
+                sizer->Add(slOutputL[i], wxGBPosition(2, i*COLS+2), wxGBSpan(1, 1), wxEXPAND);
+                sizer->Add(slOutputR[i], wxGBPosition(2, i*COLS+4), wxGBSpan(1, 1), wxEXPAND);
+                sizer->Add(slOutputB[i], wxGBPosition(2, i*COLS+3), wxGBSpan(1, 1), wxEXPAND);
+                sizer->Add(gaLevelsI[l], wxGBPosition(2, i*COLS+0), wxGBSpan(1, 1), wxEXPAND);
+                sizer->Add(gaLevelsI[r], wxGBPosition(2, i*COLS+6), wxGBSpan(1, 1), wxEXPAND);
+                sizer->Add(gaLevelsO[l], wxGBPosition(2, i*COLS+1), wxGBSpan(1, 1), wxEXPAND);
+                sizer->Add(gaLevelsO[r], wxGBPosition(2, i*COLS+5), wxGBSpan(1, 1), wxEXPAND);
+            } else {
+                gaLevelsI[l]->Hide();
+                gaLevelsI[r]->Hide();
+                gaLevelsO[l]->Hide();
+                gaLevelsO[r]->Hide();
+                slOutputL[i]->Hide();
+                slOutputB[i]->Hide();
+                slOutputR[i]->Hide();
+            }
         }
 
+        // 4. Toggle Buttons
         for (size_t i = 0; i < N_OUTPUTS ; i++){
-            ckOutputMon[i] = new wxToggleButton(this, ID_OUTPUT_MON  + i, wxString("Mon") , wxDefaultPosition, wxDefaultSize);
-            ckOutputLine[i]  = new wxToggleButton(this, ID_OUTPUT_LINE + i, wxString("Line"), wxDefaultPosition, wxDefaultSize);
-            ckOutputMon[i] ->SetValue(true);
-            ckOutputLine[i]->SetValue(true);
-
-            sizer->Add(ckOutputMon[i], wxGBPosition(3, i*COLS+0), wxGBSpan(1, 3), wxEXPAND);
-            sizer->Add(ckOutputLine[i] , wxGBPosition(3, i*COLS+4), wxGBSpan(1, 3), wxEXPAND);
+            if (isE4x4) {
+                ckOutputMon[i] = new wxToggleButton(this, ID_OUTPUT_MON  + i, wxString("Mon") , wxDefaultPosition, wxDefaultSize);
+                ckOutputLine[i]  = new wxToggleButton(this, ID_OUTPUT_LINE + i, wxString("Line"), wxDefaultPosition, wxDefaultSize);
+                ckOutputMon[i] ->SetValue(true);
+                ckOutputLine[i]->SetValue(true);
+                sizer->Add(ckOutputMon[i], wxGBPosition(3, i*COLS+0), wxGBSpan(1, 3), wxEXPAND);
+                sizer->Add(ckOutputLine[i] , wxGBPosition(3, i*COLS+4), wxGBSpan(1, 3), wxEXPAND);
+            } else if (i == 0) {
+                // Column 0 (Output 1+2): Labeled Phones (Headphones) and Line (Line Out)
+                ckOutputMon[i] = new wxToggleButton(this, ID_OUTPUT_MON  + i, wxString("Phones") , wxDefaultPosition, wxDefaultSize);
+                ckOutputLine[i]  = new wxToggleButton(this, ID_OUTPUT_LINE + i, wxString("Line"), wxDefaultPosition, wxDefaultSize);
+                ckOutputMon[i] ->SetValue(true);
+                ckOutputLine[i]->SetValue(true);
+                sizer->Add(ckOutputMon[i], wxGBPosition(3, i*COLS+0), wxGBSpan(1, 3), wxEXPAND);
+                sizer->Add(ckOutputLine[i] , wxGBPosition(3, i*COLS+4), wxGBSpan(1, 3), wxEXPAND);
+            } else {
+                // Column 1: Labeled "MUTE" for Mobile Out
+                ckOutputMon[i] = new wxToggleButton(this, ID_OUTPUT_MON  + i, wxString("MUTE") , wxDefaultPosition, wxDefaultSize);
+                ckOutputLine[i]  = new wxToggleButton(this, ID_OUTPUT_LINE + i, wxString("Unused"), wxDefaultPosition, wxDefaultSize);
+                ckOutputMon[i] ->SetValue(true);
+                ckOutputLine[i]->SetValue(true);
+                ckOutputLine[i]->Hide();
+                
+                if (isOTG) {
+                    sizer->Add(ckOutputMon[i], wxGBPosition(3, i*COLS+2), wxGBSpan(1, 3), wxEXPAND);
+                } else {
+                    ckOutputMon[i]->Hide();
+                }
+            }
         }
+
         sizer->Add(FromDIP(16), 0, wxGBPosition(0, COLS-1), wxGBSpan(3, 1));
+        if (isOTG || isE4x4) {
+            sizer->Add(FromDIP(16), 0, wxGBPosition(0, 2*COLS-1), wxGBSpan(3, 1));
+        }
         sizer->AddGrowableRow(2, 1);
         SetSizer(sizer);
     };
@@ -1742,27 +1801,49 @@ TPMixer::TPMixer()
     panelInputs = new PanelInputs(book, hid->numInputs);
     panelMixers = new PanelMixers(book);
     panelLoopbacks = new PanelLoopbacks(book);
-    panelOutputs = new PanelOutputs(book);
+    panelOutputs = new PanelOutputs(book, hid->pid);
     panelPhones = new PanelPhones(book);
 
     // Dynamic Labels for Input 3+4
-    // Dynamic Labels for Input 3+4 & Output/Phones
+    // Dynamic Labels & Feature Hiding for Input 3+4 & Output/Phones
     if (hid->pid == 0x8755 || hid->pid == 0x8756) {
         panelMixers->lbTitle[1]->SetLabel("Mobile In");
         panelPhones->lbTitle[1]->SetLabel("Mobile Out");
         panelPhones->ckPhoneGain[1]->Hide();
-        
-        panelOutputs->lbTitle[0]->SetLabel("Line Out\n(Phones Src)");
-        panelOutputs->lbTitle[1]->SetLabel("Phones Out\n(Mobile Src)");
+
+        // Hide Phase in Mixer tab
+        for (int i = 0; i < panelMixers->N_MIX_SRCS; ++i) {
+            panelMixers->ckPhase[i]->Hide();
+        }
+
+        // Hide unsupported controls in Input tab
+        for (int i = 0; i < hid->numInputs; ++i) {
+            panelInputs->cbMute[i]->Hide();
+            panelInputs->cbSolo[i]->Hide();
+            panelInputs->cbPhase[i]->Hide();
+            panelInputs->slGainI[i]->Hide();
+            panelInputs->lbGainI[i]->Hide();
+        }
     } else if (hid->pid == 0x8752) {
         panelMixers->lbTitle[1]->SetLabel("Unused");
-        
-        panelOutputs->lbTitle[0]->SetLabel("Line Out");
-        panelOutputs->lbTitle[1]->SetLabel("Phones Out");
         
         panelPhones->lbTitle[1]->SetLabel("Unused");
         panelPhones->ckPhoneGain[1]->Hide();
         panelPhones->slPhoneMix[1]->Hide();
+
+        // Hide Phase in Mixer tab
+        for (int i = 0; i < panelMixers->N_MIX_SRCS; ++i) {
+            panelMixers->ckPhase[i]->Hide();
+        }
+
+        // Hide unsupported controls in Input tab
+        for (int i = 0; i < hid->numInputs; ++i) {
+            panelInputs->cbMute[i]->Hide();
+            panelInputs->cbSolo[i]->Hide();
+            panelInputs->cbPhase[i]->Hide();
+            panelInputs->slGainI[i]->Hide();
+            panelInputs->lbGainI[i]->Hide();
+        }
     }
 
     book->AddPage(panelInputs,  "Input");
