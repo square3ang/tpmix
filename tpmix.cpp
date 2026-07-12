@@ -139,16 +139,79 @@ class ToppingHID
 public:
     uint16_t vid = 0x152a;
     uint16_t pid = 0x8754;
+    int32_t numInputs = 4;
     std::map<uint16_t, int32_t> settings;
     ToppingHID(){
-        handle = NULL;
-        handle = hid_open(vid, pid, NULL);
+        uint16_t pids[] = {0x8755, 0x8756, 0x8752, 0x8754};
+        for (uint16_t p : pids) {
+            handle = hid_open(vid, p, NULL);
+            if (NULL != handle){
+                pid = p;
+                break;
+            }
+        }
         if (NULL == handle){
-            printf("HID %04x:%04x open failed!\n", vid, pid);
-            // throw std::runtime_error("HID open failed");
+            printf("HID open failed (tried 0x8755, 0x8756, 0x8752, 0x8754)!\n");
+        } else {
+            if (pid == 0x8755) {
+                numInputs = 1;
+            } else if (pid == 0x8752 || pid == 0x8756) {
+                numInputs = 2;
+            } else {
+                numInputs = 4;
+            }
         }
         prepareBuf();
     };
+
+    void initializeSettingsWithDefaults() {
+        // 1. Inputs (ch 0..3)
+        for (int i = 0; i < 4; ++i) {
+            uint16_t base = 0x2100 + (i << 8);
+            if (!settings.contains(base + 1)) settings[base + 1] = 0; // MON
+            if (!settings.contains(base + 2)) settings[base + 2] = 0; // 48V
+            if (!settings.contains(base + 3)) settings[base + 3] = 0; // INST
+            if (!settings.contains(base + 5)) settings[base + 5] = 0x02000000; // Gain (0 dB)
+        }
+
+        // 2. Mixers (bus 0..3, src 0..11)
+        for (int bus = 0; bus < 4; ++bus) {
+            for (int src = 0; src < 12; ++src) {
+                uint16_t keyL = ((0x61 + bus * 2) << 8) | (src + 1);
+                uint16_t keyR = ((0x62 + bus * 2) << 8) | (src + 1);
+                int32_t defaultL = (src % 2 == 0) ? 0x02000000 : 0;
+                int32_t defaultR = (src % 2 == 1) ? 0x02000000 : 0;
+                if (!settings.contains(keyL)) settings[keyL] = defaultL;
+                if (!settings.contains(keyR)) settings[keyR] = defaultR;
+            }
+        }
+
+        // 3. Loopbacks (ch 0..5)
+        for (int i = 0; i < 6; ++i) {
+            uint16_t key = ((0x51 + i) << 8) | 3;
+            if (!settings.contains(key)) settings[key] = 0x02000000; // Loopback Vol (0 dB)
+        }
+        // Loopback source select
+        for (int i = 0; i < 3; ++i) {
+            uint16_t key = ((0x57 + i) << 8) | 1;
+            if (!settings.contains(key)) settings[key] = 1;
+        }
+
+        // 4. Outputs (ch 0..3)
+        for (int i = 0; i < 4; ++i) {
+            uint16_t key = ((0x31 + i) << 8) | 3;
+            if (!settings.contains(key)) settings[key] = 0x02000000; // Output Vol (0 dB)
+        }
+        // Output select for phones (ch 4..5)
+        for (int i = 0; i < 2; ++i) {
+            uint16_t key = ((0x35 + i) << 8) | 1;
+            if (!settings.contains(key)) settings[key] = 1; // Default source 1
+            
+            uint16_t keyGain = ((0x35 + i) << 8) | 2;
+            if (!settings.contains(keyGain)) settings[keyGain] = 0; // Phone gain boost off
+        }
+    }
+
     void readInfo(){
         int res = 0;
         const static size_t MAX_STR = 256;
@@ -301,10 +364,61 @@ public:
         enqueue(true, false);
     };
 
+    void requestDeviceDump(){
+        buf[5] = 0x11;
+        buf[6] = 0x05;
+        write32BE(&buf[7], 1);
+        enqueue(true, false);
+    };
+
+    void pushAllSettingsToDevice() {
+        for (const auto& [key, value] : settings) {
+            uint8_t zone = key >> 8;
+            uint8_t ctrl = key & 0xFF;
+            
+            // Skip level meters (read-only)
+            if (ctrl == 0x04 && zone >= 0x21 && zone <= 0x24) continue;
+            if ((ctrl == 0x01 || ctrl == 0x02) && zone >= 0x31 && zone <= 0x34) continue;
+            
+            // For E1x2, skip inactive input channels
+            if (numInputs == 1 && zone >= 0x22 && zone <= 0x24) continue;
+            if (numInputs == 2 && zone >= 0x23 && zone <= 0x24) continue;
+            
+            buf[5] = zone;
+            buf[6] = ctrl;
+            write32BE(&buf[7], value);
+            enqueue(true, false);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    };
+
+    uint16_t calculate_crc16(const uint8_t *data, size_t len) {
+        uint16_t crc = 0x0000;
+        for (size_t i = 0; i < len; ++i) {
+            crc ^= data[i];
+            for (int j = 0; j < 8; ++j) {
+                if (crc & 1) {
+                    crc = (crc >> 1) ^ 0xA001;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        return crc ^ 0x785A;
+    }
+
     void enqueue(bool exec = true, bool toSave = true){
         int res = 0;
+        if (pid == 0x8752 || pid == 0x8755 || pid == 0x8756) {
+            uint16_t crc = calculate_crc16(buf, 11);
+            buf[11] = (crc >> 8) & 0xFF;
+            buf[12] = crc & 0xFF;
+        } else {
+            buf[11] = 0x00;
+            buf[12] = 0x00;
+        }
         // TODO queue
-        printBuf8(buf, 16, ">> ");
+        // printBuf8(buf, 16, ">> ");
         if (NULL != handle && exec){
             res = hid_write(handle, buf, 16);
         }
@@ -385,6 +499,7 @@ class PanelInputs : public wxPanel
 {
 public:
     const static int32_t N_INPUTS = 4;
+    int32_t activeInputs;
     // Unit is 0.1dB
     const static int32_t LEVEL_MIN = -960; 
     const static int32_t LEVEL_MAX = 10; 
@@ -408,11 +523,12 @@ public:
     wxButton   *lbPeaksI[N_INPUTS];
     int32_t PeaksI[N_INPUTS];
 
-    PanelInputs(wxWindow *parent) : wxPanel(parent, wxID_ANY){
+    PanelInputs(wxWindow *parent, int32_t activeInputs = 4) : wxPanel(parent, wxID_ANY), activeInputs(activeInputs){
         const auto MARGIN = FromDIP(8);
 
         for (size_t i = 0; i < N_INPUTS ; i++){
             PeaksI[i] = LEVEL_MIN;
+            cbInst[i] = nullptr;
         }
         // 3 columns per channel, control, gain, level
         auto sizer = new wxGridBagSizer(MARGIN, MARGIN);
@@ -424,7 +540,11 @@ public:
             wxFont font = lbTitleI[iCh]->GetFont();
             lbTitleI[iCh]->SetFont(font.Larger().Larger());
 
-            sizer->Add(lbTitleI[iCh], wxGBPosition(0, iCh*3), wxGBSpan(1, 3), wxALIGN_CENTER);
+            if (iCh < activeInputs) {
+                sizer->Add(lbTitleI[iCh], wxGBPosition(0, iCh*3), wxGBSpan(1, 3), wxALIGN_CENTER);
+            } else {
+                lbTitleI[iCh]->Hide();
+            }
         }
         // peak level, with reset
         for (size_t iCh = 0; iCh < N_INPUTS ; iCh++){
@@ -434,21 +554,23 @@ public:
             lbPeaksI[iCh]->SetSize(wxSize(40,20));
             //lbPeaksI[iCh]->SetHint("Peal level\nClick to reset");
             
-            sizer->Add(lbPeaksI[iCh], wxGBPosition(1, iCh*3), wxGBSpan(1, 1), wxALIGN_CENTER);
-            
             lbGainI[iCh] = new wxStaticText(this, wxID_ANY, wxString("0 dB"));
             lbPeaksI[iCh]->SetWindowStyle(wxALIGN_RIGHT);
-            sizer->Add(lbGainI[iCh], wxGBPosition(1, iCh*3 + 1), wxGBSpan(1, 1), wxALIGN_CENTER);
+            if (iCh < activeInputs) {
+                sizer->Add(lbPeaksI[iCh], wxGBPosition(1, iCh*3), wxGBSpan(1, 1), wxALIGN_CENTER);
+                sizer->Add(lbGainI[iCh], wxGBPosition(1, iCh*3 + 1), wxGBSpan(1, 1), wxALIGN_CENTER);
+            } else {
+                lbPeaksI[iCh]->Hide();
+                lbGainI[iCh]->Hide();
+            }
         }
         for (size_t i = 0; i < N_INPUTS ; i++){
             gaLevels[i] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition, wxSize(24,100), wxGA_VERTICAL);
             gaLevels[i] ->SetValue(0);
-            sizer->Add(gaLevels[i], wxGBPosition(2, i*3), wxGBSpan(1, 1), wxEXPAND);
             
             slGainI[i] = new wxSlider (this, ID_INPUT_GAIN + i, 0, minGain, maxGain, wxDefaultPosition, wxDefaultSize, wxSL_VERTICAL | wxSL_LABELS | wxSL_INVERSE);
             slGainI[i]->SetPageSize(5);
             slGainI[i]->SetTickFreq(5);
-            sizer->Add(slGainI[i], wxGBPosition(2, i*3+1), wxGBSpan(1, 1), wxEXPAND);
 
             auto buttonPanel = new wxPanel(this, wxID_ANY);
             auto sizerButtons = new wxGridSizer(7,1,10, 10);
@@ -466,7 +588,15 @@ public:
             sizerButtons->Add(cbMute [i] = new wxToggleButton(buttonPanel,  ID_INPUT_MUTE  + i, "MUTE") , wxEXPAND);
             sizerButtons->Add(cbPhase[i] = new wxToggleButton(buttonPanel,  ID_INPUT_PHASE + i, "PHASE"), wxEXPAND);
             
-            sizer->Add(buttonPanel, wxGBPosition(2, i*3+2), wxGBSpan(1, 1), wxALIGN_TOP);
+            if (i < activeInputs) {
+                sizer->Add(gaLevels[i], wxGBPosition(2, i*3), wxGBSpan(1, 1), wxEXPAND);
+                sizer->Add(slGainI[i], wxGBPosition(2, i*3+1), wxGBSpan(1, 1), wxEXPAND);
+                sizer->Add(buttonPanel, wxGBPosition(2, i*3+2), wxGBSpan(1, 1), wxALIGN_TOP);
+            } else {
+                gaLevels[i]->Hide();
+                slGainI[i]->Hide();
+                buttonPanel->Hide();
+            }
         }
         sizer->SetMinSize(500, 300);
         sizer->AddGrowableRow(2, 1);
@@ -895,6 +1025,7 @@ protected:
     std::thread *thReader;
     hid_device *handle;
     void scbUpdateLevels(uint16_t ch16, int32_t val);
+    void pushGuiStateToDevice();
     
     void HidReader(hid_device *handle){
         uint8_t bufread[256];
@@ -921,14 +1052,15 @@ protected:
             while ((NULL != handle) && (!toStopHidReader)){
                 res = hid_read(handle, bufread, 16);
                 if (0x22 == bufread[0]){
-        #if 0
-                    printBuf8(bufread, 16, "<< ");
-        #endif
                     ch = read16BE(&bufread[5]);
                     val = read32BE(&bufread[7]);
                     CallAfter (&TPMixer::scbUpdateLevels, ch, val);
-                    if (! known.contains(ch)){
-                        printBuf8(bufread, 16, "<< ");
+                    
+                    uint8_t main_ch = ch >> 8;
+                    uint8_t sub = ch & 0xFF;
+                    bool is_level = (sub == 0x04) || (main_ch >= 0x31 && main_ch <= 0x34 && (sub == 0x01 || sub == 0x02));
+                    if (!is_level) {
+                        // printBuf8(bufread, 16, "<< ");
                     }
                 }
             }
@@ -1033,13 +1165,28 @@ protected:
         }
         for (int32_t i = begin; i < end; i++){
             // for device safety, do not restore 48V ?
-            //hid->setInput48V(ch, panelInputs->cb48V[ch]->GetValue());
-            hid->setInputMon(ch, panelInputs->cbMon[ch]->GetValue());
-            hid->setInputInst(ch, panelInputs->cbInst[ch]->GetValue());
+            //hid->setInput48V(i, panelInputs->cb48V[i]->GetValue());
+            hid->setInputMon(i, panelInputs->cbMon[i]->GetValue());
+            if (panelInputs->cbInst[i]) {
+                hid->setInputInst(i, panelInputs->cbInst[i]->GetValue());
+            }
             
-            int32_t gainVal = gain->getMonoGain(gainDB, panelInputs->cbMute[ch]->GetValue(), panelInputs->cbSolo[ch]->GetValue(), anySolo, panelInputs->cbPhase[ch]->GetValue());
+            int32_t gainVal = gain->getMonoGain(gainDB, panelInputs->cbMute[i]->GetValue(), panelInputs->cbSolo[i]->GetValue(), anySolo, panelInputs->cbPhase[i]->GetValue());
             //printf(" gain %3d dB, %11d, %08x\n", gainDB, gainVal, gainVal);
-            hid->setInputGainiI32(ch, gainVal, hw);
+            hid->setInputGainiI32(i, gainVal, hw);
+
+            // Save to settings map
+            hid->settings[0x2101 + (i << 8)] = panelInputs->cbMon[i]->GetValue() ? 1 : 0;
+            if (panelInputs->cbInst[i]) {
+                hid->settings[0x2103 + (i << 8)] = panelInputs->cbInst[i]->GetValue() ? 1 : 0;
+            }
+            hid->settings[0x2105 + (i << 8)] = gainVal;
+
+            // Save GUI-only keys for persistence
+            hid->settings[0x2106 + (i << 8)] = panelInputs->cbMute[i]->GetValue() ? 1 : 0;
+            hid->settings[0x2107 + (i << 8)] = panelInputs->cbSolo[i]->GetValue() ? 1 : 0;
+            hid->settings[0x2108 + (i << 8)] = panelInputs->cbPhase[i]->GetValue() ? 1 : 0;
+            hid->settings[0x2109 + (i << 8)] = gainDB;
         }
         if (ID_INPUT_SOLO == (evtID & 0xfff0)){
             printf(" processing SOLO control\n");
@@ -1317,7 +1464,7 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val){
                     panelMixers->gaLevel[logicCh]->SetValue(vGauge); 
                     break;
                 case 0x05: // gain
-                    {
+                    if (hid->pid == 0x8754) {
                         int32_t gainDB = 0;
                         if (0 == val){
                             gainDB = panelInputs->minGain;
@@ -1326,11 +1473,31 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val){
                             if (val < 0){
                                 val = -val;
                                 panelInputs->cbPhase[logicCh]->SetValue(true);
+                            } else {
+                                panelInputs->cbPhase[logicCh]->SetValue(false);
                             }
+                            panelInputs->cbMute[logicCh]->SetValue(false);
                             gainDB = round(log10((double)val / (double)0x02000000) * 20);
                         }
                         panelInputs->slGainI[logicCh]->SetValue(gainDB);
                     }
+                    break;
+                case 0x06: // MUTE (GUI-only)
+                    panelInputs->cbMute[logicCh]->SetValue(val ? true : false);
+                    hid->settings[0x2106 + (logicCh << 8)] = val;
+                    break;
+                case 0x07: // SOLO (GUI-only)
+                    panelInputs->cbSolo[logicCh]->SetValue(val ? true : false);
+                    hid->settings[0x2107 + (logicCh << 8)] = val;
+                    break;
+                case 0x08: // PHASE (GUI-only)
+                    panelInputs->cbPhase[logicCh]->SetValue(val ? true : false);
+                    hid->settings[0x2108 + (logicCh << 8)] = val;
+                    break;
+                case 0x09: // Slider Gain (GUI-only)
+                    panelInputs->slGainI[logicCh]->SetValue(val);
+                    panelInputs->lbGainI[logicCh]->SetLabel(wxString(std::format("{:+}dB", val)));
+                    hid->settings[0x2109 + (logicCh << 8)] = val;
                     break;
                 default:
                     break;
@@ -1344,15 +1511,15 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val){
             int32_t vGauge =  level01DB - panelOutputs->LEVEL_MIN;
             int32_t logicCh = ch - 0x31;
             int32_t index = logicCh * 2 + subCh - 1;
-            assert(logicCh < 9);
-            assert(1 <= subCh && subCh <= 4);
+            if (logicCh < 0 || logicCh >= 9) return;
+            if (subCh < 1 || subCh > 4) return;
             switch (logicCh){
                 case 0x04:
                 case 0x05:
                     // phones
                     switch (subCh){
                         case 1: // output source
-                            assert(0 < val  && val < 15);
+                            if (val <= 0 || val >= 15) break;
                             printf("select output[%1d] source %1d\n", logicCh - 4, val);
                             panelOutputs->cbSelect[logicCh - 4]->SetSelection(val - 1);
                             break;
@@ -1380,6 +1547,7 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val){
                         printf("set output control [%1d] gain %1d\n", lSubCh, val);
                     } break;
                 default: // 0..3: level meter
+                    if (logicCh < 0 || logicCh >= panelOutputs->N_OUTPUTS * 2) break;
                     switch (subCh){
                         case 1: // output level meter after fader
                         case 2: // output level meter before fader
@@ -1422,8 +1590,8 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val){
             int32_t vGauge =  level01DB - panelMixers->LEVEL_MIN;
             int32_t logicBus = ch - 0x41;
             int32_t logicCh = subCh - 1;
-            assert(logicCh <= 8);
-            assert(1 == subCh);
+            if (logicCh < 0 || logicCh > 8) return;
+            if (subCh != 1) return;
             //printf("level ch  0x%02x, %5.1fdB\n", ch16, level01DB * 0.1);
             if (vGauge < 0){
                 vGauge = 0;
@@ -1444,8 +1612,8 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val){
             int32_t logicCh = ch - 0x51;
             int32_t indexMeter = logicCh * 2 + logicCh;
             int32_t gainDB = 0;
-            assert(logicCh <= 9);
-            assert(1 <= subCh && subCh <= 5);
+            if (logicCh < 0 || logicCh > 9) return;
+            if (subCh < 1 || subCh > 5) return;
             if (vGauge < 0){
                 vGauge = 0;
             } else if (vGauge > panelOutputs->LEVEL_RANGE){
@@ -1477,6 +1645,7 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val){
                                 // no phase control
                                 //panelLoopbacks->cbPhase[logicCh]->SetValue(true);
                             }
+                            panelLoopbacks->ckMute[logicCh]->SetValue(false);
                             gainDB = round(log10((double)val / (double)0x02000000) * 20);
                             // printf("%d: %9.6f  %4d\n", __LINE__, (double)val / (double)0x02000000, gainDB);
                         }
@@ -1490,14 +1659,16 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val){
                 }
             } else {
                 // source select
-                panelLoopbacks->cbSelect[logicCh - 6]->SetSelection(val - 1);
+                if (logicCh - 6 >= 0 && logicCh - 6 < panelLoopbacks->N_LOOPBACKS) {
+                    panelLoopbacks->cbSelect[logicCh - 6]->SetSelection(val - 1);
+                }
             }
         } break;
         case 0x60:
         {
             int32_t logicCh = ch - 0x61;
-            assert(logicCh < 8);
-            assert(1 <= subCh && subCh <= 12);
+            if (logicCh < 0 || logicCh >= 8) return;
+            if (subCh < 1 || subCh > 12) return;
             hid->settings[ch16] = val;
         } break;
         default:
@@ -1546,7 +1717,16 @@ TPMixer::TPMixer()
     
     hid = new ToppingHID();
     if (NULL != hid->getHandle()){
-        SetStatusText("Topping E4X4 HID device opened.");
+        std::string deviceName = "Topping E4X4";
+        if (hid->pid == 0x8755) {
+            deviceName = "Topping E1X2 OTG";
+        } else if (hid->pid == 0x8752) {
+            deviceName = "Topping E2X2";
+        } else if (hid->pid == 0x8756) {
+            deviceName = "Topping E2X2 OTG";
+        }
+        SetStatusText(deviceName + " HID device opened.");
+        SetTitle(deviceName + " Mixer");
     }
     gain = new Gain();
 
@@ -1559,11 +1739,31 @@ TPMixer::TPMixer()
 
     auto book = new wxNotebook(this, wxID_ANY);
    
-    panelInputs = new PanelInputs(book);
+    panelInputs = new PanelInputs(book, hid->numInputs);
     panelMixers = new PanelMixers(book);
     panelLoopbacks = new PanelLoopbacks(book);
     panelOutputs = new PanelOutputs(book);
     panelPhones = new PanelPhones(book);
+
+    // Dynamic Labels for Input 3+4
+    // Dynamic Labels for Input 3+4 & Output/Phones
+    if (hid->pid == 0x8755 || hid->pid == 0x8756) {
+        panelMixers->lbTitle[1]->SetLabel("Mobile In");
+        panelPhones->lbTitle[1]->SetLabel("Mobile Out");
+        panelPhones->ckPhoneGain[1]->Hide();
+        
+        panelOutputs->lbTitle[0]->SetLabel("Line Out\n(Phones Src)");
+        panelOutputs->lbTitle[1]->SetLabel("Phones Out\n(Mobile Src)");
+    } else if (hid->pid == 0x8752) {
+        panelMixers->lbTitle[1]->SetLabel("Unused");
+        
+        panelOutputs->lbTitle[0]->SetLabel("Line Out");
+        panelOutputs->lbTitle[1]->SetLabel("Phones Out");
+        
+        panelPhones->lbTitle[1]->SetLabel("Unused");
+        panelPhones->ckPhoneGain[1]->Hide();
+        panelPhones->slPhoneMix[1]->Hide();
+    }
 
     book->AddPage(panelInputs,  "Input");
     book->AddPage(panelMixers,  "Mix");
@@ -1576,6 +1776,13 @@ TPMixer::TPMixer()
     
     loadSettings();
     startHidReader();
+    if (NULL != hid->getHandle()){
+        if (hid->pid == 0x8754) {
+            hid->requestDeviceDump();
+        } else {
+            CallAfter(&TPMixer::pushGuiStateToDevice);
+        }
+    }
 }
 
 void createDir(const std::string path){
@@ -1609,6 +1816,7 @@ void TPMixer::saveSettings(){
 }
 
 void TPMixer::loadSettings(){
+    hid->initializeSettingsWithDefaults();
     FILE *f = fopen(fileCfg.c_str(), "r");
     uint16_t key = 0;
     int32_t  value = 0;
@@ -1634,6 +1842,87 @@ void TPMixer::loadSettings(){
         CallAfter (&TPMixer::refreshOutputUi);
     } else{
         printf("Fail to open settings file.\n");
+    }
+}
+
+void TPMixer::pushGuiStateToDevice() {
+    if (NULL == hid->getHandle()) return;
+    
+    // 1. Push Inputs (MON, 48V, INST, and Gain/Mute/Solo/Phase)
+    for (int i = 0; i < hid->numInputs; ++i) {
+        hid->setInputMon(i, panelInputs->cbMon[i]->GetValue());
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        
+        hid->setInput48V(i, panelInputs->cb48V[i]->GetValue());
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        
+        if (panelInputs->cbInst[i]) {
+            hid->setInputInst(i, panelInputs->cbInst[i]->GetValue());
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        }
+        
+        // Pushes Gain, Mute, Solo, Phase
+        sendInput(i, true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+    
+    // 2. Push Output configuration
+    for (int i = 0; i < 2; ++i) {
+        int val = panelOutputs->cbSelect[i]->GetSelection();
+        hid->setOutputSel(4 + i, val + 1); // 4 + i is the channel logic ID for phones
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+    
+    // Output Mon and Line
+    for (int i = 0; i < 2; ++i) {
+        hid->setOutputMon(i, panelOutputs->ckOutputMon[i]->GetValue());
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        
+        hid->setOutputLine(i, panelOutputs->ckOutputLine[i]->GetValue());
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+    
+    // 3. Push Phones mix & Phones gain
+    for (int i = 0; i < 2; ++i) {
+        int valGain = panelPhones->ckPhoneGain[i]->GetValue() ? 1 : 0;
+        hid->setPhoneGainBoost(i, valGain);
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        
+        int valMix = panelPhones->slPhoneMix[i]->GetValue();
+        int devMix = (valMix / 2) + 50; // map back to 0..100
+        hid->setPhoneMix(i, devMix);
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+
+    // 4. Push Output levels
+    for (int i = 0; i < panelOutputs->N_OUTPUTS; ++i) {
+        setOutputVol(i);
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+
+    // 5. Push Loopback levels
+    for (int i = 0; i < panelLoopbacks->N_LOOPBACKS; ++i) {
+        setLoopVol(i);
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+
+    // 6. Push Mixers
+    int bus = panelMixers->rboxMixerSelBox->GetSelection();
+    for (int ch = 0; ch < panelMixers->N_MIX_SRCS; ++ch) {
+        int pan = panelMixers->slPan[ch]->GetValue();
+        bool mute = panelMixers->ckMute[ch]->GetValue();
+        bool solo = panelMixers->ckSolo[ch]->GetValue();
+        bool phase = panelMixers->ckPhase[ch]->GetValue();
+        int gainDB = panelMixers->slVol[ch]->GetValue();
+        
+        bool anySolo = false;
+        for (int i = 0; i < panelMixers->N_MIX_SRCS; ++i) {
+            if (panelMixers->ckSolo[i]->GetValue()) anySolo = true;
+        }
+        
+        auto [gainL, gainR] = gain->getStereoGain(gainDB, mute, solo, anySolo, phase, pan);
+        hid->setMixVol(bus, ch, gainL, gainR);
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }
 }
 
@@ -1717,12 +2006,15 @@ void TPMixer::OnInputGain(wxCommandEvent& event){
             break;
         case ID_INPUT_48V:
             hid->setInput48V(ch, panelInputs->cb48V[ch]->GetValue());
+            hid->settings[0x2102 + (ch << 8)] = panelInputs->cb48V[ch]->GetValue() ? 1 : 0;
             break;
         case ID_INPUT_MON:
             hid->setInputMon(ch, panelInputs->cbMon[ch]->GetValue());
+            hid->settings[0x2101 + (ch << 8)] = panelInputs->cbMon[ch]->GetValue() ? 1 : 0;
             break;
         case ID_INPUT_INST:
             hid->setInputInst(ch, panelInputs->cbInst[ch]->GetValue());
+            hid->settings[0x2103 + (ch << 8)] = panelInputs->cbInst[ch]->GetValue() ? 1 : 0;
             break;
         default:
             break;
@@ -1805,6 +2097,8 @@ void TPMixer::OnMixVolume(wxCommandEvent& event){
                 gainDB=panelMixers->slVol[srcs[i]]->GetValue();
                 std::tie(gainL, gainR) = gain->getStereoGain(gainDB, mute, solo, anySolo, phase, pan);
                 hid->setMixVol(bus, srcs[i], gainL, gainR);
+                hid->settings[((0x61 + bus * 2) << 8) | (srcs[i] + 1)] = gainL;
+                hid->settings[((0x62 + bus * 2) << 8) | (srcs[i] + 1)] = gainR;
             }
         }
     }
@@ -1970,6 +2264,13 @@ void TPMixer::OnClose(wxCloseEvent& event)
 void TPMixer::OnLoad(wxCommandEvent& event)
 {
     loadSettings();
+    if (NULL != hid->getHandle()){
+        if (hid->pid == 0x8754) {
+            hid->requestDeviceDump();
+        } else {
+            CallAfter(&TPMixer::pushGuiStateToDevice);
+        }
+    }
 }
  
 void TPMixer::OnSave(wxCommandEvent& event)
