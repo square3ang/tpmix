@@ -2005,8 +2005,12 @@ void TPMixer::pushGuiStateToDevice() {
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }
 
-    // 5. Push Loopback levels
+    // 5. Push Loopback source selection and levels
     for (int i = 0; i < panelLoopbacks->N_LOOPBACKS; ++i) {
+        int valSel = panelLoopbacks->cbSelect[i]->GetSelection();
+        hid->setLoopSel(i, valSel + 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+
         setLoopVol(i);
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }
