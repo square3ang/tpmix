@@ -30,7 +30,7 @@
 #include <wx/slider.h>
 #include <wx/notebook.h>
 #include <wx/panel.h>
-//#include <wx/checkbox.h>
+#include <wx/checkbox.h>
 #include <wx/gbsizer.h>
 #include <wx/tglbtn.h>
 
@@ -211,6 +211,10 @@ public:
             uint16_t keyGain = ((0x35 + i) << 8) | 2;
             if (!settings.contains(keyGain)) settings[keyGain] = 0; // Phone gain boost off
         }
+
+        // 5. Device Settings
+        if (!settings.contains(0x3901)) settings[0x3901] = 1; // Auto Standby default: ON
+        if (!settings.contains(0x3a01)) settings[0x3a01] = 1; // OTG Mode default: ON
     }
 
     void readInfo(){
@@ -370,6 +374,13 @@ public:
         buf[6] = 0x05;
         write32BE(&buf[7], 1);
         enqueue(true, false);
+    };
+
+    void setDeviceSetting(uint8_t zone, uint8_t ctrl, int32_t value, bool exec = true){
+        buf[5] = zone;
+        buf[6] = ctrl;
+        write32BE(&buf[7], value);
+        enqueue(exec);
     };
 
     void pushAllSettingsToDevice() {
@@ -1088,6 +1099,36 @@ public:
 }; // PanelPhones
 
 
+class PanelDevice : public wxPanel
+{
+public:
+    wxCheckBox *cbAutoStandby;
+    wxCheckBox *cbOTGMode;
+
+    PanelDevice(wxWindow *parent, uint16_t pid) : wxPanel(parent, wxID_ANY) {
+        auto sizerMain = new wxBoxSizer(wxVERTICAL);
+        
+        auto sizerGroup = new wxStaticBoxSizer(wxVERTICAL, this, "Device Settings");
+        
+        cbAutoStandby = new wxCheckBox(sizerGroup->GetStaticBox(), wxID_ANY, "Auto Standby");
+        cbAutoStandby->SetValue(true);
+        sizerGroup->Add(cbAutoStandby, 0, wxALL | wxEXPAND, 8);
+        
+        bool isOTG = (pid == 0x8755 || pid == 0x8756);
+        if (isOTG) {
+            cbOTGMode = new wxCheckBox(sizerGroup->GetStaticBox(), wxID_ANY, "OTG Mode (Mobile Charging/Power)");
+            cbOTGMode->SetValue(true);
+            sizerGroup->Add(cbOTGMode, 0, wxALL | wxEXPAND, 8);
+        } else {
+            cbOTGMode = nullptr;
+        }
+        
+        sizerMain->Add(sizerGroup, 0, wxEXPAND | wxALL, 15);
+        SetSizer(sizerMain);
+    };
+}; // PanelDevice
+
+
 class TPMixer : public wxFrame
 {
 public:
@@ -1101,6 +1142,7 @@ public:
     PanelLoopbacks  *panelLoopbacks;
     PanelOutputs    *panelOutputs;
     PanelPhones     *panelPhones;
+    PanelDevice     *panelDevice;
 
     TPMixer();
 protected:
@@ -1300,6 +1342,7 @@ protected:
     void OnDeviceSave(wxCommandEvent& event);
     void OnExit(wxCommandEvent& event);
     void OnAbout(wxCommandEvent& event);
+    void OnDeviceToggle(wxCommandEvent& event);
     
     void OnUpdateLevels(wxCommandEvent& evt);
     void OnClose(wxCloseEvent& event);
@@ -1601,7 +1644,7 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val){
             int32_t vGauge =  level01DB - panelOutputs->LEVEL_MIN;
             int32_t logicCh = ch - 0x31;
             int32_t index = logicCh * 2 + subCh - 1;
-            if (logicCh < 0 || logicCh >= 9) return;
+            if (logicCh < 0 || logicCh >= 10) return;
             if (subCh < 1 || subCh > 4) return;
             switch (logicCh){
                 case 0x04:
@@ -1636,6 +1679,18 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val){
                         }
                         printf("set output control [%1d] gain %1d\n", lSubCh, val);
                     } break;
+                case 0x08: // 0x39, Auto Standby
+                    if (subCh == 1) {
+                        panelDevice->cbAutoStandby->SetValue(val ? true : false);
+                        hid->settings[0x3901] = val;
+                    }
+                    break;
+                case 0x09: // 0x3a, OTG Mode / Mobile Port
+                    if (subCh == 1 && panelDevice->cbOTGMode) {
+                        panelDevice->cbOTGMode->SetValue(val ? true : false);
+                        hid->settings[0x3a01] = val;
+                    }
+                    break;
                 default: // 0..3: level meter
                     if (logicCh < 0 || logicCh >= panelOutputs->N_OUTPUTS * 2) break;
                     switch (subCh){
@@ -1834,6 +1889,12 @@ TPMixer::TPMixer()
     panelLoopbacks = new PanelLoopbacks(book);
     panelOutputs = new PanelOutputs(book, hid->pid);
     panelPhones = new PanelPhones(book);
+    panelDevice = new PanelDevice(book, hid->pid);
+
+    panelDevice->cbAutoStandby->Bind(wxEVT_CHECKBOX, &TPMixer::OnDeviceToggle, this);
+    if (panelDevice->cbOTGMode) {
+        panelDevice->cbOTGMode->Bind(wxEVT_CHECKBOX, &TPMixer::OnDeviceToggle, this);
+    }
 
     // Dynamic Labels for Input 3+4
     // Dynamic Labels & Feature Hiding for Input 3+4 & Output/Phones
@@ -1882,6 +1943,7 @@ TPMixer::TPMixer()
     book->AddPage(panelLoopbacks,    "Loopback");
     book->AddPage(panelOutputs, "Output");
     book->AddPage(panelPhones,  "Phones");
+    book->AddPage(panelDevice,  "Device");
 
     mainSizer->Add(book, 1, wxEXPAND | wxALL, 8);
     SetSizer(mainSizer);
@@ -1981,7 +2043,7 @@ void TPMixer::pushGuiStateToDevice() {
     // 2. Push Output configuration
     for (int i = 0; i < 2; ++i) {
         int val = panelOutputs->cbSelect[i]->GetSelection();
-        hid->setOutputSel(4 + i, val + 1); // 4 + i is the channel logic ID for phones
+        hid->setOutputSel(i, val + 1);
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }
     
@@ -2038,6 +2100,17 @@ void TPMixer::pushGuiStateToDevice() {
         
         auto [gainL, gainR] = gain->getStereoGain(gainDB, mute, solo, anySolo, phase, pan);
         hid->setMixVol(bus, ch, gainL, gainR);
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+
+    // 7. Push Device Settings
+    int valStandby = panelDevice->cbAutoStandby->GetValue() ? 1 : 0;
+    hid->setDeviceSetting(0x39, 0x01, valStandby);
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    
+    if (panelDevice->cbOTGMode) {
+        int valOTG = panelDevice->cbOTGMode->GetValue() ? 1 : 0;
+        hid->setDeviceSetting(0x3a, 0x01, valOTG);
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }
 }
@@ -2403,5 +2476,21 @@ void TPMixer::OnAbout(wxCommandEvent& event)
 {
     wxMessageBox("This is Topping Mixer GUI Controller with wxWidgets",
                  "About tpmix", wxOK | wxICON_INFORMATION);
+}
+
+void TPMixer::OnDeviceToggle(wxCommandEvent& event)
+{
+    if (NULL == hid->getHandle()) return;
+    
+    bool val = event.IsChecked();
+    int32_t val32 = val ? 1 : 0;
+    
+    if (event.GetEventObject() == panelDevice->cbAutoStandby) {
+        hid->setDeviceSetting(0x39, 0x01, val32);
+        hid->settings[0x3901] = val32;
+    } else if (panelDevice->cbOTGMode && event.GetEventObject() == panelDevice->cbOTGMode) {
+        hid->setDeviceSetting(0x3a, 0x01, val32);
+        hid->settings[0x3a01] = val32;
+    }
 }
  
