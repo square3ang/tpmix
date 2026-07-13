@@ -206,7 +206,7 @@ public:
         // Output select for phones (ch 4..5)
         for (int i = 0; i < 2; ++i) {
             uint16_t key = ((0x35 + i) << 8) | 1;
-            if (!settings.contains(key)) settings[key] = 1; // Default source 1
+            if (!settings.contains(key)) settings[key] = 7; // Default source 7 (Playback 1+2)
             
             uint16_t keyGain = ((0x35 + i) << 8) | 2;
             if (!settings.contains(keyGain)) settings[keyGain] = 0; // Phone gain boost off
@@ -970,7 +970,7 @@ public:
 
         // 2. Combo Boxes (cbSelect)
         for (size_t i = 0; i < N_OUTPUTS ; i++){
-            cbSelect[i] = new wxComboBox (this, ID_OUTPUT_SEL + i, OutputSels[10+i], wxDefaultPosition, wxDefaultSize, 14, OutputSels, wxCB_READONLY);
+            cbSelect[i] = new wxComboBox (this, ID_OUTPUT_SEL + i, OutputSels[6], wxDefaultPosition, wxDefaultSize, 14, OutputSels, wxCB_READONLY);
             if (i == 0 || (i == 1 && isOTG) || (i == 1 && isE4x4)) {
                 sizer->Add(cbSelect[i], wxGBPosition(1, i * COLS), wxGBSpan(1, COLS - 1), wxALIGN_CENTER);
             } else {
