@@ -17,6 +17,7 @@
 */
 
 #include <cstdint>
+#include <cstdlib>
 #include <format>
 
 #include <thread>
@@ -444,6 +445,12 @@ protected:
     };
 };
 
+
+struct GdkForceX11 {
+    GdkForceX11() {
+        setenv("GDK_BACKEND", "x11", 1);
+    }
+} gdk_force_x11;
 
 class MyApp : public wxApp
 {
