@@ -443,6 +443,12 @@ public:
     hid_device *getHandle(){
         return handle;
     }
+    ~ToppingHID() {
+        if (NULL != handle) {
+            hid_close(handle);
+            handle = NULL;
+        }
+    }
 protected:
     uint8_t buf[16];
 
@@ -467,6 +473,10 @@ class MyApp : public wxApp
 {
 public:
     bool OnInit() override;
+    int OnExit() override {
+        hid_exit();
+        return wxApp::OnExit();
+    }
 };
  
 wxIMPLEMENT_APP(MyApp);
@@ -1183,7 +1193,11 @@ protected:
             printf("%s(), polling\n", __func__);
             while ((NULL != handle) && (!toStopHidReader)){
                 res = hid_read(handle, bufread, 16);
-                if (0x22 == bufread[0]){
+                if (res < 0) {
+                    printf("hid_read failed: %d\n", res);
+                    break;
+                }
+                if (res > 0 && 0x22 == bufread[0]){
                     ch = read16BE(&bufread[5]);
                     val = read32BE(&bufread[7]);
                     CallAfter (&TPMixer::scbUpdateLevels, ch, val);
@@ -1206,7 +1220,7 @@ protected:
                 for (int32_t l = 0; (l < 1030) && (!toStopHidReader); l += 4){
                     rndv[l % 3] = rand() % panelInputs->LEVEL_RANGE;
                     
-                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     CallAfter (&TPMixer::scbUpdateLevels, (uint16_t) (0x2104 + (ch << 8)), (rndv[0] * rndv[1] / panelInputs->LEVEL_RANGE * rndv[2] / panelInputs->LEVEL_RANGE + panelInputs->LEVEL_MIN));
                     ch = (ch + 1) & 0x03;
                     //CallAfter (&TPMixer::scbUpdateLevels, (uint16_t)0x2204, v / 2);
@@ -1995,7 +2009,7 @@ void TPMixer::loadSettings(){
     uint16_t key = 0;
     int32_t  value = 0;
     ssize_t n;
-    size_t len;
+    size_t len = 0;
     char *line = NULL;
     if (NULL != f){
         printf("setting file opened. reading...\n");
@@ -2008,7 +2022,7 @@ void TPMixer::loadSettings(){
         }
         printf("Finished\n");
         if (NULL != line){
-            //free(line);
+            free(line);
         }
         fclose(f);
         CallAfter (&TPMixer::refreshMixerUi, -1);
@@ -2443,7 +2457,18 @@ void TPMixer::OnClose(wxCloseEvent& event)
     //printf("Stopping thread %p\n", thReader);
 
     toStopHidReader = true;
-    thReader->join();
+    if (thReader && thReader->joinable()) {
+        thReader->join();
+    }
+    delete thReader;
+    thReader = nullptr;
+
+    delete hid;
+    hid = nullptr;
+
+    delete gain;
+    gain = nullptr;
+
     saveSettings();
     //printf("veto?\n");
     //event.Veto();
