@@ -16,27 +16,27 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
-#include <format>
 #include <filesystem>
+#include <format>
+#include <iostream>
 #include <map>
+#include <math.h>
 #include <set>
 #include <thread>
 #include <tuple>
-#include <algorithm>
-#include <iostream>
-#include <math.h>
 
-#include <wx/wx.h>
+#include <wx/combobox.h>
 #include <wx/dcbuffer.h>
 #include <wx/graphics.h>
 #include <wx/statline.h>
 #include <wx/tglbtn.h>
-#include <wx/combobox.h>
+#include <wx/wx.h>
 
-#include <inttypes.h>
 #include <hidapi/hidapi.h>
+#include <inttypes.h>
 
 // Helper functions for HID buffer manipulation
 void write32BE(uint8_t *buf, int32_t v32) {
@@ -133,6 +133,9 @@ public:
   uint16_t pid = 0x8754;
   int32_t numInputs = 4;
   std::map<uint16_t, int32_t> settings;
+  uint8_t phoneRegOffset() const {
+    return 0x35;
+  }
   ToppingHID() {
     uint16_t pids[] = {0x8755, 0x8756, 0x8752, 0x8754};
     for (uint16_t p : pids) {
@@ -204,14 +207,19 @@ public:
         settings[key] = 0x02000000; // Output Vol (0 dB)
     }
     // Output select for phones (ch 4..5)
+    uint8_t phoneBase = phoneRegOffset();
     for (int i = 0; i < 2; ++i) {
-      uint16_t key = ((0x35 + i) << 8) | 1;
+      uint16_t key = ((phoneBase + i) << 8) | 1;
       if (!settings.contains(key))
         settings[key] = 7; // Default source 7 (Playback 1+2)
 
-      uint16_t keyGain = ((0x35 + i) << 8) | 2;
+      uint16_t keyGain = ((phoneBase + i) << 8) | 2;
       if (!settings.contains(keyGain))
         settings[keyGain] = 0; // Phone gain boost off
+
+      uint16_t keyMix = ((phoneBase + i) << 8) | 3;
+      if (!settings.contains(keyMix))
+        settings[keyMix] = 50; // Default Monitor Mix: 50 (Center, 0 dB)
     }
 
     // 5. Device Settings
@@ -225,6 +233,22 @@ public:
       settings[0x1103] = 1; // OTG Mode default: ON for non-E4X4
     if (!settings.contains(0x100a))
       settings[0x100a] = 1; // LED Brightness default: Medium (1)
+
+    // 6. GUI Link Settings (default values)
+    if (!settings.contains(0x9000))
+      settings[0x9000] = 1;
+    for (int i = 0; i < 6; ++i) {
+      if (!settings.contains(0x9100 + i)) {
+        settings[0x9100 + i] =
+            (i == 0) ? 0 : 1; // Column 0 (IN 1) unlinked by default!
+      }
+    }
+    for (int i = 0; i < 3; ++i) {
+      if (!settings.contains(0x9200 + i))
+        settings[0x9200 + i] = 1;
+      if (!settings.contains(0x9300 + i))
+        settings[0x9300 + i] = 1;
+    }
   }
 
   void setInputGainiI32(int16_t ch, int32_t gain, bool exec = true) {
@@ -305,13 +329,13 @@ public:
     enqueue(exec);
   };
   void setPhoneMix(int16_t ch, int32_t mix, bool exec = true) {
-    buf[5] = 0x35 + ch;
+    buf[5] = phoneRegOffset() + ch;
     buf[6] = 0x03;
     write32BE(&buf[7], (mix + 100) / 2);
     enqueue(exec);
   };
   void setPhoneGainBoost(int16_t ch, int32_t gain, bool exec = true) {
-    buf[5] = 0x35 + ch;
+    buf[5] = phoneRegOffset() + ch;
     buf[6] = 0x02;
     write32BE(&buf[7], gain);
     enqueue(exec);
@@ -323,9 +347,15 @@ public:
     enqueue(true, false);
   };
   void requestDeviceDump() {
-    buf[5] = 0x11;
-    buf[6] = 0x05;
-    write32BE(&buf[7], 1);
+    if (pid == 0x8754) {
+      buf[5] = 0x11;
+      buf[6] = 0x05;
+      write32BE(&buf[7], 1);
+    } else {
+      buf[5] = 0x20;
+      buf[6] = 0x05;
+      write32BE(&buf[7], 0x02000000);
+    }
     enqueue(true, false);
   };
   void setDeviceSetting(uint8_t zone, uint8_t ctrl, int32_t value,
@@ -445,7 +475,8 @@ void createDir(const std::string path) {
   if (!std::filesystem::exists(path)) {
     try {
       std::filesystem::create_directory(path);
-    } catch (...) {}
+    } catch (...) {
+    }
   }
 }
 
@@ -480,7 +511,7 @@ public:
     }
     m_designFontPoint = 8.0;
     SetBackgroundStyle(wxBG_STYLE_PAINT);
-    
+
     Bind(wxEVT_PAINT, &CustomButton::OnPaint, this);
     Bind(wxEVT_LEFT_DOWN, &CustomButton::OnLeftDown, this);
     Bind(wxEVT_LEFT_UP, &CustomButton::OnLeftUp, this);
@@ -507,7 +538,11 @@ public:
 
   void Rescale(double scale) {
     SetMinSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
-    SetMaxSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+    if (m_designSize.x <= 18) {
+      SetMaxSize(wxSize(-1, m_designSize.y * scale));
+    } else {
+      SetMaxSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+    }
   }
 
 private:
@@ -520,17 +555,21 @@ private:
   IconType m_iconType;
 
   void OnPaint(wxPaintEvent &evt) {
+    if (GetParent()) {
+      SetBackgroundColour(GetParent()->GetBackgroundColour());
+    }
     wxAutoBufferedPaintDC dc(this);
     dc.Clear();
-    
+
     wxGraphicsContext *gc = wxGraphicsContext::Create(dc);
-    if (!gc) return;
+    if (!gc)
+      return;
 
     gc->Scale(g_uiScale, g_uiScale);
     wxSize sz = GetSize();
     double dx = sz.x / g_uiScale;
     double dy = sz.y / g_uiScale;
-    
+
     // Background based on state
     wxColour bgCol;
     if (m_isToggle && m_isChecked) {
@@ -542,6 +581,10 @@ private:
     } else {
       bgCol = wxColour(44, 44, 44);
     }
+    if (!IsEnabled()) {
+      bgCol = wxColour((bgCol.Red() + 33) / 2, (bgCol.Green() + 33) / 2,
+                       (bgCol.Blue() + 33) / 2);
+    }
 
     gc->SetBrush(wxBrush(bgCol));
     gc->SetPen(wxPen(wxColour(24, 24, 24), 1));
@@ -552,17 +595,33 @@ private:
 
     if (m_iconType == ICON_NONE) {
       // Draw standard text label
-      wxColour textCol = (m_isToggle && m_isChecked) ? wxColour(255, 255, 255) : wxColour(180, 180, 180);
+      wxColour textCol = (m_isToggle && m_isChecked) ? wxColour(255, 255, 255)
+                                                     : wxColour(180, 180, 180);
+      if (!IsEnabled()) {
+        textCol = wxColour(100, 100, 100);
+      }
       wxFont font = GetFont();
-      font.SetPointSize(8);
+      double fontScale = 1.0 + (g_uiScale - 1.0) * 0.4;
+      if (fontScale < 0.8) fontScale = 0.8;
+      if (fontScale > 1.25) fontScale = 1.25;
+
+      int ptSize = std::max(6, (int)(8 * fontScale));
+      if (dy < 14.0 * g_uiScale)
+        ptSize = std::max(5, (int)(7 * fontScale));
+      font.SetPointSize(ptSize);
       gc->SetFont(font, textCol);
-      
+
       double tw, th, td, tel;
       gc->GetTextExtent(m_label, &tw, &th, &td, &tel);
       gc->DrawText(m_label, (dx - tw) / 2.0, (dy - th) / 2.0);
     } else {
       // Draw Vector Icon
-      gc->SetPen(wxPen((m_isToggle && m_isChecked) ? *wxWHITE : wxColour(220, 220, 220), 1.5));
+      wxColour iconCol =
+          (m_isToggle && m_isChecked) ? *wxWHITE : wxColour(220, 220, 220);
+      if (!IsEnabled()) {
+        iconCol = wxColour(100, 100, 100);
+      }
+      gc->SetPen(wxPen(iconCol, 1.5));
       gc->SetBrush(*wxTRANSPARENT_BRUSH);
 
       if (m_iconType == ICON_GEAR) {
@@ -571,8 +630,10 @@ private:
         gc->DrawEllipse(cx - rOuter, cy - rOuter, rOuter * 2, rOuter * 2);
         gc->SetBrush(wxBrush(bgCol));
         gc->DrawEllipse(cx - rInner, cy - rInner, rInner * 2, rInner * 2);
-        
-        gc->SetPen(wxPen((m_isToggle && m_isChecked) ? *wxWHITE : wxColour(220, 220, 220), 1.6));
+
+        gc->SetPen(wxPen((m_isToggle && m_isChecked) ? *wxWHITE
+                                                     : wxColour(220, 220, 220),
+                         1.6));
         for (int i = 0; i < 8; ++i) {
           double angle = i * M_PI / 4.0;
           double x1 = cx + rOuter * cos(angle);
@@ -584,9 +645,9 @@ private:
       } else if (m_iconType == ICON_SAVE) {
         double w = 10.0;
         double h = 10.0;
-        double x = cx - w/2.0;
-        double y = cy - h/2.0;
-        
+        double x = cx - w / 2.0;
+        double y = cy - h / 2.0;
+
         wxGraphicsPath path = gc->CreatePath();
         path.MoveToPoint(x, y + h);
         path.AddLineToPoint(x + w, y + h);
@@ -595,7 +656,7 @@ private:
         path.AddLineToPoint(x, y);
         path.CloseSubpath();
         gc->StrokePath(path);
-        
+
         gc->DrawRectangle(cx - 2.5, cy + 1.0, 5.0, 3.5);
         gc->DrawRectangle(cx - 2.5, cy - 4.5, 4.0, 2.5);
       } else if (m_iconType == ICON_DOWNLOAD) {
@@ -608,8 +669,8 @@ private:
         wxGraphicsPath path = gc->CreatePath();
         path.AddArc(cx, cy + 1.0, r, M_PI, 0, true);
         gc->StrokePath(path);
-        
-        gc->SetBrush(wxBrush((m_isToggle && m_isChecked) ? *wxWHITE : wxColour(220, 220, 220)));
+
+        gc->SetBrush(wxBrush(iconCol));
         gc->DrawRectangle(cx - r - 1.0, cy, 1.8, 3.5);
         gc->DrawRectangle(cx + r - 0.8, cy, 1.8, 3.5);
       }
@@ -619,6 +680,8 @@ private:
   }
 
   void OnLeftDown(wxMouseEvent &evt) {
+    if (!IsEnabled())
+      return;
     m_isPressed = true;
     if (m_isToggle) {
       m_isChecked = !m_isChecked;
@@ -725,13 +788,14 @@ private:
     wxAutoBufferedPaintDC dc(this);
     dc.Clear();
     wxGraphicsContext *gc = wxGraphicsContext::Create(dc);
-    if (!gc) return;
+    if (!gc)
+      return;
 
     gc->Scale(g_uiScale, g_uiScale);
     wxSize sz = GetSize();
     double dx = sz.x / g_uiScale;
     double dy = sz.y / g_uiScale;
-    
+
     gc->SetBrush(wxBrush(wxColour(30, 30, 30)));
     gc->SetPen(*wxTRANSPARENT_PEN);
     gc->DrawRectangle(0, 0, dx, dy);
@@ -741,11 +805,13 @@ private:
     double knobCenterY = (dy - 12) / 2.0 + 1;
 
     gc->SetBrush(wxBrush(wxColour(16, 16, 16)));
-    gc->DrawEllipse(knobCenterX - knobRadius, knobCenterY - knobRadius, knobRadius * 2, knobRadius * 2);
+    gc->DrawEllipse(knobCenterX - knobRadius, knobCenterY - knobRadius,
+                    knobRadius * 2, knobRadius * 2);
 
     gc->SetBrush(wxBrush(wxColour(46, 46, 46)));
     gc->SetPen(wxPen(wxColour(75, 75, 75), 1));
-    gc->DrawEllipse(knobCenterX - knobRadius + 1, knobCenterY - knobRadius + 1, (knobRadius - 1) * 2, (knobRadius - 1) * 2);
+    gc->DrawEllipse(knobCenterX - knobRadius + 1, knobCenterY - knobRadius + 1,
+                    (knobRadius - 1) * 2, (knobRadius - 1) * 2);
 
     double pct = (double)(m_val - m_min) / (m_max - m_min);
     double angleDeg = -135.0 + pct * 270.0;
@@ -753,15 +819,18 @@ private:
 
     double px = knobCenterX + (knobRadius - 3) * sin(angleRad);
     double py = knobCenterY - (knobRadius - 3) * cos(angleRad);
-    gc->SetPen(wxPen(wxColour(255, 255, 255), 1.8));
+    gc->SetPen(wxPen(
+        IsEnabled() ? wxColour(255, 255, 255) : wxColour(100, 100, 100), 1.8));
     gc->StrokeLine(knobCenterX, knobCenterY, px, py);
 
     wxFont font = GetFont();
     font.SetPointSize(8);
-    gc->SetFont(font, wxColour(150, 150, 150));
+    gc->SetFont(font,
+                IsEnabled() ? wxColour(150, 150, 150) : wxColour(80, 80, 80));
     wxString valStr = std::format("{:+}", m_val);
-    if (m_val == 0) valStr = "+0";
-    
+    if (m_val == 0)
+      valStr = "+0";
+
     double tw, th, td, tel;
     gc->GetTextExtent(valStr, &tw, &th, &td, &tel);
     gc->DrawText(valStr, (dx - tw) / 2.0, dy - th - 1);
@@ -770,6 +839,8 @@ private:
   }
 
   void OnLeftDown(wxMouseEvent &evt) {
+    if (!IsEnabled())
+      return;
     m_isDragging = true;
     m_dragStartPos = evt.GetPosition();
     m_dragStartVal = m_val;
@@ -791,19 +862,19 @@ private:
   void OnMotion(wxMouseEvent &evt) {
     if (m_isDragging) {
       wxPoint currPos = evt.GetPosition();
-      int dy = m_dragStartPos.y - currPos.y; 
+      int dy = m_dragStartPos.y - currPos.y;
       int valRange = m_max - m_min;
-      
+
       int delta = dy * (valRange / 120.0);
       if (delta == 0 && dy != 0) {
         delta = (dy > 0) ? 1 : -1;
       }
-      
+
       int newVal = std::clamp(m_dragStartVal + delta, m_min, m_max);
       if (newVal != m_val) {
         m_val = newVal;
         Refresh();
-        
+
         wxCommandEvent event(wxEVT_SLIDER, GetId());
         event.SetEventObject(this);
         event.SetInt(m_val);
@@ -813,10 +884,12 @@ private:
   }
 
   void OnDoubleClick(wxMouseEvent &evt) {
+    if (!IsEnabled())
+      return;
     if (m_val != m_default) {
       m_val = m_default;
       Refresh();
-      
+
       wxCommandEvent event(wxEVT_SLIDER, GetId());
       event.SetEventObject(this);
       event.SetInt(m_val);
@@ -832,8 +905,8 @@ public:
   LevelMeter(wxWindow *parent, wxWindowID id, bool stereo = false,
              const wxSize &size = wxSize(14, 100))
       : wxWindow(parent, id, wxDefaultPosition, size, wxBORDER_NONE),
-        m_stereo(stereo), m_leftVal(-960), m_rightVal(-960),
-        m_leftPeak(-960), m_rightPeak(-960) {
+        m_stereo(stereo), m_leftVal(-960), m_rightVal(-960), m_leftPeak(-960),
+        m_rightPeak(-960) {
     m_designSize = size;
     if (m_designSize.x <= 0 || m_designSize.y <= 0) {
       m_designSize = wxSize(14, 100);
@@ -844,15 +917,18 @@ public:
 
   void SetValue(int val) {
     m_leftVal = std::clamp(val, -960, 10);
-    if (m_leftVal > m_leftPeak) m_leftPeak = m_leftVal;
+    if (m_leftVal > m_leftPeak)
+      m_leftPeak = m_leftVal;
     Refresh();
   }
 
   void SetValues(int left, int right) {
     m_leftVal = std::clamp(left, -960, 10);
     m_rightVal = std::clamp(right, -960, 10);
-    if (m_leftVal > m_leftPeak) m_leftPeak = m_leftVal;
-    if (m_rightVal > m_rightPeak) m_rightPeak = m_rightVal;
+    if (m_leftVal > m_leftPeak)
+      m_leftPeak = m_leftVal;
+    if (m_rightVal > m_rightPeak)
+      m_rightPeak = m_rightVal;
     Refresh();
   }
 
@@ -867,7 +943,7 @@ public:
 
   void Rescale(double scale) {
     SetMinSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
-    SetMaxSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+    SetMaxSize(wxSize(-1, -1));
   }
 
 private:
@@ -881,13 +957,14 @@ private:
     wxAutoBufferedPaintDC dc(this);
     dc.Clear();
     wxGraphicsContext *gc = wxGraphicsContext::Create(dc);
-    if (!gc) return;
+    if (!gc)
+      return;
 
     gc->Scale(g_uiScale, g_uiScale);
     wxSize sz = GetSize();
     double dx = sz.x / g_uiScale;
     double dy = sz.y / g_uiScale;
-    
+
     gc->SetBrush(wxBrush(wxColour(30, 30, 30)));
     gc->SetPen(*wxTRANSPARENT_PEN);
     gc->DrawRectangle(0, 0, dx, dy);
@@ -895,9 +972,9 @@ private:
     int numBars = m_stereo ? 2 : 1;
     double spacing = 1.0;
     double barWidth = (dx - 2.0 - (numBars - 1) * spacing) / numBars;
-    
-    int vals[2] = { m_leftVal, m_rightVal };
-    int peaks[2] = { m_leftPeak, m_rightPeak };
+
+    int vals[2] = {m_leftVal, m_rightVal};
+    int peaks[2] = {m_leftPeak, m_rightPeak};
 
     for (int i = 0; i < numBars; ++i) {
       double x = 1.0 + i * (barWidth + spacing);
@@ -952,11 +1029,11 @@ public:
 
   FaderStrip(wxWindow *parent, wxWindowID id, int minVal, int maxVal,
              bool stereo = false, const wxSize &size = wxSize(45, 120))
-      : wxWindow(parent, id, wxDefaultPosition, size, wxBORDER_NONE | wxWANTS_CHARS),
+      : wxWindow(parent, id, wxDefaultPosition, size,
+                 wxBORDER_NONE | wxWANTS_CHARS),
         m_val(0), m_min(minVal), m_max(maxVal), m_stereo(stereo),
-        m_leftVal(-960), m_rightVal(-960),
-        m_leftPeak(-960), m_rightPeak(-960),
-        m_isDragging(false) {
+        m_leftVal(-960), m_rightVal(-960), m_leftPeak(-960), m_rightPeak(-960),
+        m_isDragging(false), m_meterOnRight(false) {
     m_designSize = size;
     if (m_designSize.x <= 0 || m_designSize.y <= 0) {
       m_designSize = wxSize(45, 120);
@@ -969,8 +1046,14 @@ public:
     Bind(wxEVT_MOTION, &FaderStrip::OnMotion, this);
     Bind(wxEVT_MOUSE_CAPTURE_LOST, &FaderStrip::OnMouseCaptureLost, this);
     Bind(wxEVT_KEY_DOWN, &FaderStrip::OnKeyDown, this);
-    Bind(wxEVT_SET_FOCUS, [this](wxFocusEvent &evt) { Refresh(); evt.Skip(); });
-    Bind(wxEVT_KILL_FOCUS, [this](wxFocusEvent &evt) { Refresh(); evt.Skip(); });
+    Bind(wxEVT_SET_FOCUS, [this](wxFocusEvent &evt) {
+      Refresh();
+      evt.Skip();
+    });
+    Bind(wxEVT_KILL_FOCUS, [this](wxFocusEvent &evt) {
+      Refresh();
+      evt.Skip();
+    });
   }
 
   void OnKeyDown(wxKeyEvent &evt) {
@@ -999,8 +1082,10 @@ public:
   void SetMeterLevels(int left, int right) {
     m_leftVal = std::clamp(left, -960, 10);
     m_rightVal = std::clamp(right, -960, 10);
-    if (m_leftVal > m_leftPeak) m_leftPeak = m_leftVal;
-    if (m_rightVal > m_rightPeak) m_rightPeak = m_rightVal;
+    if (m_leftVal > m_leftPeak)
+      m_leftPeak = m_leftVal;
+    if (m_rightVal > m_rightPeak)
+      m_rightPeak = m_rightVal;
     Refresh();
   }
 
@@ -1009,10 +1094,13 @@ public:
     m_rightPeak = -960;
     Refresh();
   }
-
+  void SetMeterOnRight(bool onRight) {
+    m_meterOnRight = onRight;
+    Refresh();
+  }
   void Rescale(double scale) {
     SetMinSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
-    SetMaxSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+    SetMaxSize(wxSize(-1, -1));
   }
 
 private:
@@ -1027,6 +1115,7 @@ private:
   bool m_isDragging;
   int m_dragStartVal;
   wxPoint m_dragStartPos;
+  bool m_meterOnRight;
 
   double ValToY(int val, double hSlot, double ySlot) {
     double pct = (double)(val - m_min) / (m_max - m_min);
@@ -1044,13 +1133,14 @@ private:
     wxAutoBufferedPaintDC dc(this);
     dc.Clear();
     wxGraphicsContext *gc = wxGraphicsContext::Create(dc);
-    if (!gc) return;
+    if (!gc)
+      return;
 
     gc->Scale(g_uiScale, g_uiScale);
     wxSize sz = GetSize();
     double dx = sz.x / g_uiScale;
     double dy = sz.y / g_uiScale;
-    
+
     gc->SetBrush(wxBrush(wxColour(30, 30, 30)));
     if (HasFocus()) {
       gc->SetPen(wxPen(wxColour(29, 115, 201), 1));
@@ -1059,55 +1149,47 @@ private:
     }
     gc->DrawRectangle(0, 0, dx, dy);
 
-    double meterWidth = 4.0;
+    double meterWidth = 5.0;
     double faderSlotWidth = 3.0;
     double ySlot = 4.0;
     double hSlot = dy - 8.0;
 
-    double xL = 2.0;
-    double xR = dx - 2.0 - meterWidth;
-    
-    // Center of fader track
-    double xCenter;
-    if (m_stereo) {
-      xCenter = dx / 2.0;
-    } else {
-      xCenter = (dx + meterWidth + 2.0) / 2.0;
-    }
+    double xCenter = dx / 2.0;
+    double offset = m_stereo ? 26.0 : 20.0;
+    double xL = xCenter - offset;
+    double xR = xCenter + offset - meterWidth;
 
     // 1. Draw Level Meters
-    // Left Meter
-    gc->SetBrush(wxBrush(wxColour(12, 12, 12)));
-    gc->DrawRectangle(xL, ySlot, meterWidth, hSlot);
-    double pctL = (double)(m_leftVal - (-960)) / (10 - (-960));
-    pctL = std::clamp(pctL, 0.0, 1.0);
-    double hL = hSlot * pctL;
-    double yL = ySlot + hSlot - hL;
-    if (hL > 0) {
-      gc->SetBrush(wxBrush(wxColour(89, 155, 34)));
-      gc->DrawRectangle(xL, yL, meterWidth, hL);
-
-      double yellowDb = -120;
-      if (m_leftVal > yellowDb) {
-        double pctY = (double)(yellowDb - (-960)) / (10 - (-960));
-        double yYellow = ySlot + hSlot - hSlot * pctY;
-        double hYellow = yYellow - yL;
-        gc->SetBrush(wxBrush(wxColour(241, 196, 15)));
-        gc->DrawRectangle(xL, yL, meterWidth, hYellow);
-      }
-
-      double redDb = -30;
-      if (m_leftVal > redDb) {
-        double pctR = (double)(redDb - (-960)) / (10 - (-960));
-        double yRed = ySlot + hSlot - hSlot * pctR;
-        double hRed = yRed - yL;
-        gc->SetBrush(wxBrush(wxColour(192, 57, 43)));
-        gc->DrawRectangle(xL, yL, meterWidth, hRed);
-      }
-    }
-
-    // Right Meter (only if stereo)
     if (m_stereo) {
+      // Left Meter (stereo)
+      gc->SetBrush(wxBrush(wxColour(12, 12, 12)));
+      gc->DrawRectangle(xL, ySlot, meterWidth, hSlot);
+      double pctL = (double)(m_leftVal - (-960)) / (10 - (-960));
+      pctL = std::clamp(pctL, 0.0, 1.0);
+      double hL = hSlot * pctL;
+      double yL = ySlot + hSlot - hL;
+      if (hL > 0) {
+        gc->SetBrush(wxBrush(wxColour(89, 155, 34)));
+        gc->DrawRectangle(xL, yL, meterWidth, hL);
+        double yellowDb = -120;
+        if (m_leftVal > yellowDb) {
+          double pctY = (double)(yellowDb - (-960)) / (10 - (-960));
+          double yYellow = ySlot + hSlot - hSlot * pctY;
+          double hYellow = yYellow - yL;
+          gc->SetBrush(wxBrush(wxColour(241, 196, 15)));
+          gc->DrawRectangle(xL, yL, meterWidth, hYellow);
+        }
+        double redDb = -30;
+        if (m_leftVal > redDb) {
+          double pctR = (double)(redDb - (-960)) / (10 - (-960));
+          double yRed = ySlot + hSlot - hSlot * pctR;
+          double hRed = yRed - yL;
+          gc->SetBrush(wxBrush(wxColour(192, 57, 43)));
+          gc->DrawRectangle(xL, yL, meterWidth, hRed);
+        }
+      }
+
+      // Right Meter (stereo)
       gc->SetBrush(wxBrush(wxColour(12, 12, 12)));
       gc->DrawRectangle(xR, ySlot, meterWidth, hSlot);
       double pctR = (double)(m_rightVal - (-960)) / (10 - (-960));
@@ -1117,7 +1199,6 @@ private:
       if (hR > 0) {
         gc->SetBrush(wxBrush(wxColour(89, 155, 34)));
         gc->DrawRectangle(xR, yR, meterWidth, hR);
-
         double yellowDb = -120;
         if (m_rightVal > yellowDb) {
           double pctY = (double)(yellowDb - (-960)) / (10 - (-960));
@@ -1126,7 +1207,6 @@ private:
           gc->SetBrush(wxBrush(wxColour(241, 196, 15)));
           gc->DrawRectangle(xR, yR, meterWidth, hYellow);
         }
-
         double redDb = -30;
         if (m_rightVal > redDb) {
           double pctR = (double)(redDb - (-960)) / (10 - (-960));
@@ -1136,11 +1216,41 @@ private:
           gc->DrawRectangle(xR, yR, meterWidth, hRed);
         }
       }
+    } else {
+      // Mono Meter (uses m_leftVal at xL or xR)
+      double xMeter = m_meterOnRight ? xR : xL;
+      gc->SetBrush(wxBrush(wxColour(12, 12, 12)));
+      gc->DrawRectangle(xMeter, ySlot, meterWidth, hSlot);
+      double pct = (double)(m_leftVal - (-960)) / (10 - (-960));
+      pct = std::clamp(pct, 0.0, 1.0);
+      double h = hSlot * pct;
+      double y = ySlot + hSlot - h;
+      if (h > 0) {
+        gc->SetBrush(wxBrush(wxColour(89, 155, 34)));
+        gc->DrawRectangle(xMeter, y, meterWidth, h);
+        double yellowDb = -120;
+        if (m_leftVal > yellowDb) {
+          double pctY = (double)(yellowDb - (-960)) / (10 - (-960));
+          double yYellow = ySlot + hSlot - hSlot * pctY;
+          double hYellow = yYellow - y;
+          gc->SetBrush(wxBrush(wxColour(241, 196, 15)));
+          gc->DrawRectangle(xMeter, y, meterWidth, hYellow);
+        }
+        double redDb = -30;
+        if (m_leftVal > redDb) {
+          double pctR = (double)(redDb - (-960)) / (10 - (-960));
+          double yRed = ySlot + hSlot - hSlot * pctR;
+          double hRed = yRed - y;
+          gc->SetBrush(wxBrush(wxColour(192, 57, 43)));
+          gc->DrawRectangle(xMeter, y, meterWidth, hRed);
+        }
+      }
     }
 
     // 2. Draw Fader Track
     gc->SetBrush(wxBrush(wxColour(10, 10, 10)));
-    gc->DrawRectangle(xCenter - faderSlotWidth/2.0, ySlot, faderSlotWidth, hSlot);
+    gc->DrawRectangle(xCenter - faderSlotWidth / 2.0, ySlot, faderSlotWidth,
+                      hSlot);
 
     // 3. Draw Ticks & Labels
     gc->SetPen(wxPen(wxColour(70, 70, 70), 1));
@@ -1151,7 +1261,11 @@ private:
           gc->StrokeLine(xCenter - 8, yTick, xCenter - 4, yTick);
           gc->StrokeLine(xCenter + 4, yTick, xCenter + 8, yTick);
         } else {
-          gc->StrokeLine(xCenter - 6, yTick, xCenter - 3, yTick);
+          if (m_meterOnRight) {
+            gc->StrokeLine(xCenter - 8, yTick, xCenter - 4, yTick);
+          } else {
+            gc->StrokeLine(xCenter + 4, yTick, xCenter + 8, yTick);
+          }
         }
 
         wxFont font = GetFont();
@@ -1161,9 +1275,13 @@ private:
         double tw, th, td, tel;
         gc->GetTextExtent(lbl, &tw, &th, &td, &tel);
         if (m_stereo) {
-          gc->DrawText(lbl, xCenter - 8 - tw, yTick - th/2.0);
+          gc->DrawText(lbl, xCenter - 8 - tw, yTick - th / 2.0);
         } else {
-          gc->DrawText(lbl, xCenter + 5, yTick - th/2.0);
+          if (m_meterOnRight) {
+            gc->DrawText(lbl, xCenter - 8 - tw, yTick - th / 2.0);
+          } else {
+            gc->DrawText(lbl, xCenter + 10, yTick - th / 2.0);
+          }
         }
       }
     }
@@ -1172,25 +1290,37 @@ private:
     double handleHeight = 12.0;
     double handleWidth = m_stereo ? 18.0 : 16.0;
     double yHandle = ValToY(m_val, hSlot, ySlot) - handleHeight / 2.0;
-    
+
     gc->SetBrush(wxBrush(wxColour(245, 245, 245)));
     gc->SetPen(wxPen(wxColour(90, 90, 90), 1));
-    gc->DrawRoundedRectangle(xCenter - handleWidth/2.0, yHandle, handleWidth, handleHeight, 1.5);
+    gc->DrawRoundedRectangle(xCenter - handleWidth / 2.0, yHandle, handleWidth,
+                             handleHeight, 1.5);
 
     // Black line across the center of the handle
     gc->SetPen(wxPen(wxColour(20, 20, 20), 1.5));
-    gc->StrokeLine(xCenter - handleWidth/2.0 + 1, yHandle + handleHeight/2.0, xCenter + handleWidth/2.0 - 1, yHandle + handleHeight/2.0);
+    gc->StrokeLine(
+        xCenter - handleWidth / 2.0 + 1, yHandle + handleHeight / 2.0,
+        xCenter + handleWidth / 2.0 - 1, yHandle + handleHeight / 2.0);
 
     // 5. Draw Peaks
-    double pctPL = (double)(m_leftPeak - (-960)) / (10 - (-960));
-    pctPL = std::clamp(pctPL, 0.0, 1.0);
-    gc->SetPen(wxPen(wxColour(255, 0, 0), 1));
-    gc->StrokeLine(xL, ySlot + hSlot - hSlot * pctPL, xL + meterWidth, ySlot + hSlot - hSlot * pctPL);
-
     if (m_stereo) {
+      double pctPL = (double)(m_leftPeak - (-960)) / (10 - (-960));
+      pctPL = std::clamp(pctPL, 0.0, 1.0);
+      gc->SetPen(wxPen(wxColour(255, 0, 0), 1));
+      gc->StrokeLine(xL, ySlot + hSlot - hSlot * pctPL, xL + meterWidth,
+                     ySlot + hSlot - hSlot * pctPL);
+
       double pctPR = (double)(m_rightPeak - (-960)) / (10 - (-960));
       pctPR = std::clamp(pctPR, 0.0, 1.0);
-      gc->StrokeLine(xR, ySlot + hSlot - hSlot * pctPR, xR + meterWidth, ySlot + hSlot - hSlot * pctPR);
+      gc->StrokeLine(xR, ySlot + hSlot - hSlot * pctPR, xR + meterWidth,
+                     ySlot + hSlot - hSlot * pctPR);
+    } else {
+      double xMeter = m_meterOnRight ? xR : xL;
+      double pctPL = (double)(m_leftPeak - (-960)) / (10 - (-960));
+      pctPL = std::clamp(pctPL, 0.0, 1.0);
+      gc->SetPen(wxPen(wxColour(255, 0, 0), 1));
+      gc->StrokeLine(xMeter, ySlot + hSlot - hSlot * pctPL, xMeter + meterWidth,
+                     ySlot + hSlot - hSlot * pctPL);
     }
 
     delete gc;
@@ -1202,7 +1332,7 @@ private:
     m_dragStartPos = evt.GetPosition();
     m_dragStartVal = m_val;
     CaptureMouse();
-    
+
     double ySlot = 4.0;
     double hSlot = GetSize().y - 8.0;
     int newVal = YToVal(m_dragStartPos.y, hSlot, ySlot);
@@ -1231,11 +1361,11 @@ private:
       double ySlot = 4.0;
       double hSlot = GetSize().y - 8.0;
       wxPoint currPos = evt.GetPosition();
-      
+
       int dy = currPos.y - m_dragStartPos.y;
       double startY = ValToY(m_dragStartVal, hSlot, ySlot);
       int newVal = YToVal(startY + dy, hSlot, ySlot);
-      
+
       newVal = std::clamp(newVal, m_min, m_max);
       if (newVal != m_val) {
         m_val = newVal;
@@ -1260,8 +1390,9 @@ private:
 class SettingsDialog : public wxDialog {
 public:
   SettingsDialog(wxWindow *parent, uint16_t pid, ToppingHID *hid)
-      : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxSize(450, 350),
-                 wxDEFAULT_DIALOG_STYLE), m_hid(hid) {
+      : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition,
+                 wxSize(450, 350), wxDEFAULT_DIALOG_STYLE),
+        m_hid(hid) {
     SetBackgroundColour(wxColour(30, 30, 30));
     SetForegroundColour(wxColour(220, 220, 220));
 
@@ -1270,12 +1401,14 @@ public:
 
     // Left Column: System settings
     wxBoxSizer *leftCol = new wxBoxSizer(wxVERTICAL);
-    wxStaticText *lblSysTitle = new wxStaticText(this, wxID_ANY, "System settings");
+    wxStaticText *lblSysTitle =
+        new wxStaticText(this, wxID_ANY, "System settings");
     lblSysTitle->SetFont(lblSysTitle->GetFont().Bold().Larger());
     leftCol->Add(lblSysTitle, 0, wxALL, 5);
 
     wxBoxSizer *langSizer = new wxBoxSizer(wxHORIZONTAL);
-    langSizer->Add(new wxStaticText(this, wxID_ANY, "Language:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+    langSizer->Add(new wxStaticText(this, wxID_ANY, "Language:"), 0,
+                   wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
     wxChoice *choiceLang = new wxChoice(this, wxID_ANY);
     choiceLang->Append("English");
     choiceLang->SetSelection(0);
@@ -1283,19 +1416,23 @@ public:
     leftCol->Add(langSizer, 0, wxALL | wxEXPAND, 5);
 
     wxBoxSizer *scaleSizer = new wxBoxSizer(wxHORIZONTAL);
-    scaleSizer->Add(new wxStaticText(this, wxID_ANY, "UI Scaling:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+    scaleSizer->Add(new wxStaticText(this, wxID_ANY, "UI Scaling:"), 0,
+                    wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
     wxChoice *choiceScale = new wxChoice(this, wxID_ANY);
     choiceScale->Append("100%");
     choiceScale->SetSelection(0);
     scaleSizer->Add(choiceScale, 1, wxEXPAND);
     leftCol->Add(scaleSizer, 0, wxALL | wxEXPAND, 5);
 
-    leftCol->Add(new wxStaticText(this, wxID_ANY, "Workspace storage:"), 0, wxTOP | wxLEFT, 5);
+    leftCol->Add(new wxStaticText(this, wxID_ANY, "Workspace storage:"), 0,
+                 wxTOP | wxLEFT, 5);
     wxBoxSizer *dirSizer = new wxBoxSizer(wxHORIZONTAL);
-    wxStaticText *lblDir = new wxStaticText(this, wxID_ANY, "~/.config/topping...");
+    wxStaticText *lblDir =
+        new wxStaticText(this, wxID_ANY, "~/.config/topping...");
     lblDir->SetForegroundColour(wxColour(140, 140, 140));
     dirSizer->Add(lblDir, 1, wxALIGN_CENTER_VERTICAL);
-    wxButton *btnChangeDir = new wxButton(this, wxID_ANY, "Change", wxDefaultPosition, wxSize(55, 20));
+    wxButton *btnChangeDir = new wxButton(this, wxID_ANY, "Change",
+                                          wxDefaultPosition, wxSize(55, 20));
     dirSizer->Add(btnChangeDir, 0, wxLEFT, 5);
     leftCol->Add(dirSizer, 0, wxALL | wxEXPAND, 5);
 
@@ -1313,23 +1450,27 @@ public:
 
     colsSizer->Add(leftCol, 1, wxALL | wxEXPAND, 8);
 
-    wxStaticLine *divLine = new wxStaticLine(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_VERTICAL);
+    wxStaticLine *divLine = new wxStaticLine(this, wxID_ANY, wxDefaultPosition,
+                                             wxDefaultSize, wxLI_VERTICAL);
     colsSizer->Add(divLine, 0, wxEXPAND | wxTOP | wxBOTTOM, 8);
 
     // Right Column: Device settings
     wxBoxSizer *rightCol = new wxBoxSizer(wxVERTICAL);
-    wxStaticText *lblDevTitle = new wxStaticText(this, wxID_ANY, "Device settings");
+    wxStaticText *lblDevTitle =
+        new wxStaticText(this, wxID_ANY, "Device settings");
     lblDevTitle->SetFont(lblDevTitle->GetFont().Bold().Larger());
     rightCol->Add(lblDevTitle, 0, wxALL, 5);
 
     wxBoxSizer *brightSizer = new wxBoxSizer(wxHORIZONTAL);
-    brightSizer->Add(new wxStaticText(this, wxID_ANY, "Brightness:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+    brightSizer->Add(new wxStaticText(this, wxID_ANY, "Brightness:"), 0,
+                     wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
     choiceBrightness = new wxChoice(this, wxID_ANY);
     choiceBrightness->Append("Low");
     choiceBrightness->Append("Normal");
     choiceBrightness->Append("High");
-    
-    int brightVal = m_hid->settings.contains(0x100a) ? m_hid->settings[0x100a] : 1;
+
+    int brightVal =
+        m_hid->settings.contains(0x100a) ? m_hid->settings[0x100a] : 1;
     choiceBrightness->SetSelection(std::clamp(brightVal, 0, 2));
     brightSizer->Add(choiceBrightness, 1, wxEXPAND);
     rightCol->Add(brightSizer, 0, wxALL | wxEXPAND, 5);
@@ -1337,9 +1478,11 @@ public:
     cbAutoStandby = new wxCheckBox(this, wxID_ANY, "Automatic standby");
     int standbyVal = 1;
     if (pid == 0x8754) {
-      standbyVal = m_hid->settings.contains(0x3901) ? m_hid->settings[0x3901] : 1;
+      standbyVal =
+          m_hid->settings.contains(0x3901) ? m_hid->settings[0x3901] : 1;
     } else {
-      standbyVal = m_hid->settings.contains(0x1101) ? m_hid->settings[0x1101] : 1;
+      standbyVal =
+          m_hid->settings.contains(0x1101) ? m_hid->settings[0x1101] : 1;
     }
     cbAutoStandby->SetValue(standbyVal ? true : false);
     rightCol->Add(cbAutoStandby, 0, wxALL, 5);
@@ -1347,12 +1490,14 @@ public:
     bool isOTG = (pid == 0x8755 || pid == 0x8756);
     if (isOTG) {
       cbOTGMode = new wxCheckBox(this, wxID_ANY, "Mobile applications");
-      int otgVal = m_hid->settings.contains(0x1103) ? m_hid->settings[0x1103] : 1;
+      int otgVal =
+          m_hid->settings.contains(0x1103) ? m_hid->settings[0x1103] : 1;
       cbOTGMode->SetValue(otgVal ? true : false);
       rightCol->Add(cbOTGMode, 0, wxALL, 5);
     } else if (pid == 0x8754) {
       cbOTGMode = new wxCheckBox(this, wxID_ANY, "Mobile applications");
-      int otgVal = m_hid->settings.contains(0x3a01) ? m_hid->settings[0x3a01] : 1;
+      int otgVal =
+          m_hid->settings.contains(0x3a01) ? m_hid->settings[0x3a01] : 1;
       cbOTGMode->SetValue(otgVal ? true : false);
       rightCol->Add(cbOTGMode, 0, wxALL, 5);
     } else {
@@ -1362,32 +1507,49 @@ public:
     colsSizer->Add(rightCol, 1, wxALL | wxEXPAND, 8);
     mainSizer->Add(colsSizer, 0, wxEXPAND);
 
-    mainSizer->Add(new wxStaticLine(this, wxID_ANY), 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
+    mainSizer->Add(new wxStaticLine(this, wxID_ANY), 0,
+                   wxEXPAND | wxLEFT | wxRIGHT, 10);
 
     // Version details
     wxBoxSizer *verSizer = new wxBoxSizer(wxVERTICAL);
-    wxStaticText *lblVerTitle = new wxStaticText(this, wxID_ANY, "Version information");
+    wxStaticText *lblVerTitle =
+        new wxStaticText(this, wxID_ANY, "Version information");
     lblVerTitle->SetFont(lblVerTitle->GetFont().Bold());
     verSizer->Add(lblVerTitle, 0, wxALL, 4);
 
     wxString deviceName = "E2x2 OTG";
-    if (pid == 0x8754) deviceName = "E4x4";
-    else if (pid == 0x8755) deviceName = "E1x2 OTG";
-    else if (pid == 0x8752) deviceName = "E2x2";
+    if (pid == 0x8754)
+      deviceName = "E4x4";
+    else if (pid == 0x8755)
+      deviceName = "E1x2 OTG";
+    else if (pid == 0x8752)
+      deviceName = "E2x2";
 
-    verSizer->Add(new wxStaticText(this, wxID_ANY, "Device model: " + deviceName), 0, wxLEFT | wxBOTTOM, 2);
-    verSizer->Add(new wxStaticText(this, wxID_ANY, "Device hardware version: V1.01"), 0, wxLEFT | wxBOTTOM, 2);
-    verSizer->Add(new wxStaticText(this, wxID_ANY, "Device software version: V1.07"), 0, wxLEFT | wxBOTTOM, 2);
-    verSizer->Add(new wxStaticText(this, wxID_ANY, "TOPPING Control Center version: V1.08"), 0, wxLEFT | wxBOTTOM, 4);
+    verSizer->Add(
+        new wxStaticText(this, wxID_ANY, "Device model: " + deviceName), 0,
+        wxLEFT | wxBOTTOM, 2);
+    verSizer->Add(
+        new wxStaticText(this, wxID_ANY, "Device hardware version: V1.01"), 0,
+        wxLEFT | wxBOTTOM, 2);
+    verSizer->Add(
+        new wxStaticText(this, wxID_ANY, "Device software version: V1.07"), 0,
+        wxLEFT | wxBOTTOM, 2);
+    verSizer->Add(new wxStaticText(this, wxID_ANY,
+                                   "TOPPING Control Center version: V1.08"),
+                  0, wxLEFT | wxBOTTOM, 4);
 
     wxBoxSizer *btnSizer = new wxBoxSizer(wxHORIZONTAL);
-    wxButton *btnCheck = new wxButton(this, wxID_ANY, "Check for updates", wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    wxButton *btnCheck =
+        new wxButton(this, wxID_ANY, "Check for updates", wxDefaultPosition,
+                     wxDefaultSize, wxBORDER_NONE);
     btnCheck->SetBackgroundColour(wxColour(50, 50, 50));
     btnCheck->SetForegroundColour(*wxWHITE);
-    wxButton *btnWeb = new wxButton(this, wxID_ANY, "Official website", wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    wxButton *btnWeb =
+        new wxButton(this, wxID_ANY, "Official website", wxDefaultPosition,
+                     wxDefaultSize, wxBORDER_NONE);
     btnWeb->SetBackgroundColour(wxColour(50, 50, 50));
     btnWeb->SetForegroundColour(*wxWHITE);
-    
+
     btnSizer->Add(btnCheck, 0, wxRIGHT, 8);
     btnSizer->Add(btnWeb, 0);
     verSizer->Add(btnSizer, 0, wxLEFT | wxTOP, 3);
@@ -1420,14 +1582,15 @@ private:
   wxCheckBox *cbUpdates;
 
   void OnDeviceChange(wxCommandEvent &evt) {
-    if (NULL == m_hid->getHandle()) return;
-    
+    if (NULL == m_hid->getHandle())
+      return;
+
     int sel = choiceBrightness->GetSelection();
     if (sel != wxNOT_FOUND) {
       m_hid->setDeviceSetting(0x10, 0x0a, sel);
       m_hid->settings[0x100a] = sel;
     }
-    
+
     bool val = cbAutoStandby->GetValue();
     int val32 = val ? 1 : 0;
     if (m_hid->pid == 0x8754) {
@@ -1455,16 +1618,19 @@ private:
 class DownloadDialog : public wxDialog {
 public:
   DownloadDialog(wxWindow *parent)
-      : wxDialog(parent, wxID_ANY, "Download", wxDefaultPosition, wxSize(380, 180),
-                 wxDEFAULT_DIALOG_STYLE) {
+      : wxDialog(parent, wxID_ANY, "Download", wxDefaultPosition,
+                 wxSize(380, 180), wxDEFAULT_DIALOG_STYLE) {
     SetBackgroundColour(wxColour(30, 30, 30));
     SetForegroundColour(wxColour(220, 220, 220));
 
     wxBoxSizer *mainSizer = new wxBoxSizer(wxVERTICAL);
     mainSizer->Add(new wxStaticText(this, wxID_ANY, ""), 0, wxTOP, 10);
 
-    rbOption1 = new wxRadioButton(this, wxID_ANY, "Save current workspace and download to device", wxDefaultPosition, wxDefaultSize, wxRB_GROUP);
-    rbOption2 = new wxRadioButton(this, wxID_ANY, "Save as workspace and download to device");
+    rbOption1 = new wxRadioButton(
+        this, wxID_ANY, "Save current workspace and download to device",
+        wxDefaultPosition, wxDefaultSize, wxRB_GROUP);
+    rbOption2 = new wxRadioButton(this, wxID_ANY,
+                                  "Save as workspace and download to device");
     rbOption3 = new wxRadioButton(this, wxID_ANY, "Download to device only");
 
     rbOption1->SetForegroundColour(*wxWHITE);
@@ -1476,11 +1642,14 @@ public:
     mainSizer->Add(rbOption3, 0, wxALL, 6);
 
     wxBoxSizer *btnSizer = new wxBoxSizer(wxHORIZONTAL);
-    wxButton *btnCancel = new wxButton(this, wxID_CANCEL, "Cancel", wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    wxButton *btnCancel =
+        new wxButton(this, wxID_CANCEL, "Cancel", wxDefaultPosition,
+                     wxDefaultSize, wxBORDER_NONE);
     btnCancel->SetBackgroundColour(wxColour(45, 45, 45));
     btnCancel->SetForegroundColour(*wxWHITE);
-    
-    wxButton *btnOK = new wxButton(this, wxID_OK, "OK", wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+
+    wxButton *btnOK = new wxButton(this, wxID_OK, "OK", wxDefaultPosition,
+                                   wxDefaultSize, wxBORDER_NONE);
     btnOK->SetBackgroundColour(wxColour(55, 55, 55));
     btnOK->SetForegroundColour(*wxWHITE);
 
@@ -1515,11 +1684,11 @@ public:
   wxStaticText *lbTitleI[N_INPUTS];
   CustomButton *lbPeaksI[N_INPUTS];
   wxStaticText *lbGainVal[N_INPUTS];
-  
-  FaderStrip *slGainI[N_INPUTS]; 
-  FaderStrip *slGainICombined; 
-  CustomButton *btnLink; 
-  KnobControl *slPanI[N_INPUTS]; 
+
+  FaderStrip *slGainI[N_INPUTS];
+  FaderStrip *slGainICombined;
+  CustomButton *btnLink;
+  KnobControl *slPanI[N_INPUTS];
 
   CustomButton *cb48V[N_INPUTS];
   CustomButton *cbMon[N_INPUTS];
@@ -1550,7 +1719,7 @@ public:
       dc.SetBackground(wxBrush(wxColour(33, 33, 33)));
       dc.Clear();
     });
-    
+
     // Safety null initializations
     for (size_t i = 0; i < N_INPUTS; i++) {
       lbTitleI[i] = nullptr;
@@ -1571,30 +1740,34 @@ public:
     combBtnSizer = splitBtnSizer = nullptr;
 
     wxBoxSizer *mainSizer = new wxBoxSizer(wxVERTICAL);
-    
+
     // Top Panel Title
     wxBoxSizer *titleRow = new wxBoxSizer(wxHORIZONTAL);
     wxStaticText *lblTitle = new wxStaticText(this, wxID_ANY, "Input");
     lblTitle->SetFont(lblTitle->GetFont().Bold().Larger());
     lblTitle->SetForegroundColour(*wxWHITE);
     titleRow->Add(lblTitle, 0, wxLEFT | wxTOP, 6);
-    
+
     wxStaticText *lblBar = new wxStaticText(this, wxID_ANY, "  |");
     lblBar->SetFont(lblBar->GetFont().Bold().Larger());
     lblBar->SetForegroundColour(wxColour(80, 80, 80));
     titleRow->Add(lblBar, 0, wxTOP, 6);
-    
+
     mainSizer->Add(titleRow, 0, wxBOTTOM, 4);
 
     wxBoxSizer *colsSizer = new wxBoxSizer(wxHORIZONTAL);
 
     int numCols = 0;
-    if (pid == 0x8754) numCols = 3; 
-    else if (pid == 0x8752 || pid == 0x8756) numCols = 2; 
-    else numCols = 1; 
+    if (pid == 0x8754)
+      numCols = 3;
+    else if (pid == 0x8752 || pid == 0x8756)
+      numCols = 2;
+    else
+      numCols = 1;
 
     for (int col = 0; col < numCols; ++col) {
-      wxPanel *colPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, "colPanel");
+      wxPanel *colPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition,
+                                      wxDefaultSize, 0, "colPanel");
       colPanel->SetBackgroundColour(wxColour(25, 25, 25));
       colPanel->Bind(wxEVT_PAINT, [colPanel](wxPaintEvent &evt) {
         wxPaintDC dc(colPanel);
@@ -1602,119 +1775,160 @@ public:
         dc.Clear();
       });
       wxBoxSizer *colSizer = new wxBoxSizer(wxVERTICAL);
-      
+
       wxString colName;
-      if (col == 0) colName = "IN 1";
-      else if (col == 1) colName = "IN 2";
-      else colName = "Disconnected"; 
-      
-      lbTitleI[col] = new wxStaticText(colPanel, wxID_ANY, colName, wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      if (col == 0)
+        colName = "IN 1";
+      else if (col == 1)
+        colName = "IN 2";
+      else
+        colName = "Disconnected";
+
+      lbTitleI[col] =
+          new wxStaticText(colPanel, wxID_ANY, colName, wxDefaultPosition,
+                           wxDefaultSize, wxALIGN_CENTER);
       lbTitleI[col]->SetFont(lbTitleI[col]->GetFont().Bold());
       lbTitleI[col]->SetForegroundColour(wxColour(180, 180, 180));
       colSizer->Add(lbTitleI[col], 0, wxALIGN_CENTER | wxTOP, 4);
-      
+
       PeaksI[col] = LEVEL_MIN;
       inLevelVal[col] = LEVEL_MIN;
-      if (col == 2) inLevelVal[3] = LEVEL_MIN; 
-      
+      if (col == 2)
+        inLevelVal[3] = LEVEL_MIN;
+
       // Gain display label
-      lbGainVal[col] = new wxStaticText(colPanel, wxID_ANY, "-60 dB", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbGainVal[col] =
+          new wxStaticText(colPanel, wxID_ANY, "-60 dB", wxDefaultPosition,
+                           wxDefaultSize, wxALIGN_CENTER);
       lbGainVal[col]->SetForegroundColour(wxColour(220, 220, 220));
       lbGainVal[col]->SetFont(lbGainVal[col]->GetFont().Smaller());
       colSizer->Add(lbGainVal[col], 0, wxALIGN_CENTER | wxTOP, 2);
-      
+
       // Middle Part (Fader(s) & Buttons)
       wxBoxSizer *midSizer = new wxBoxSizer(wxHORIZONTAL);
       wxBoxSizer *faderSizer = new wxBoxSizer(wxHORIZONTAL);
-      
+
       if (col < 2) {
-        slGainI[col] = new FaderStrip(colPanel, ID_INPUT_GAIN + col, minGain, maxGain, false, wxSize(40, 90));
+        slGainI[col] = new FaderStrip(colPanel, ID_INPUT_GAIN + col, minGain,
+                                      maxGain, false, wxSize(40, 90));
         faderSizer->Add(slGainI[col], 1, wxEXPAND);
       } else {
         // Stereo channel IN 3+4
-        slGainI[2] = new FaderStrip(colPanel, ID_INPUT_GAIN + 2, minGain, maxGain, false, wxSize(32, 90));
-        slGainI[3] = new FaderStrip(colPanel, ID_INPUT_GAIN + 3, minGain, maxGain, false, wxSize(32, 90));
-        slGainICombined = new FaderStrip(colPanel, ID_INPUT_GAIN + 2, minGain, maxGain, true, wxSize(50, 90));
-        
+        slGainI[2] = new FaderStrip(colPanel, ID_INPUT_GAIN + 2, minGain,
+                                    maxGain, false, wxSize(32, 90));
+        slGainI[2]->SetMeterOnRight(true);
+        slGainI[3] = new FaderStrip(colPanel, ID_INPUT_GAIN + 3, minGain,
+                                    maxGain, false, wxSize(32, 90));
+        slGainICombined = new FaderStrip(colPanel, ID_INPUT_GAIN + 2, minGain,
+                                         maxGain, true, wxSize(50, 90));
+
         faderSizer->Add(slGainI[2], 1, wxEXPAND);
         faderSizer->Add(slGainI[3], 1, wxEXPAND);
         faderSizer->Add(slGainICombined, 1, wxEXPAND);
-        
+
         slGainI[2]->Hide();
         slGainI[3]->Hide();
       }
-      
-      midSizer->Add(faderSizer, 1, wxEXPAND | wxLEFT | wxRIGHT, 4);
-      
-      wxBoxSizer *btnCol = new wxBoxSizer(wxVERTICAL);
-      
-      if (col < 2) {
-        cbMon[col] = new CustomButton(colPanel, ID_INPUT_MON + col, "MON", true, wxSize(36, 15), wxColour(89, 155, 34));
-        cb48V[col] = new CustomButton(colPanel, ID_INPUT_48V + col, "48V", true, wxSize(36, 15), wxColour(192, 57, 43));
-        cbInst[col] = new CustomButton(colPanel, ID_INPUT_INST + col, "INST", true, wxSize(36, 15), wxColour(89, 155, 34));
-        cbSolo[col] = new CustomButton(colPanel, ID_INPUT_SOLO + col, "SOLO", true, wxSize(36, 15), wxColour(241, 196, 15));
-        cbMute[col] = new CustomButton(colPanel, ID_INPUT_MUTE + col, "MUTE", true, wxSize(36, 15), wxColour(192, 57, 43));
-        cbPhase[col] = new CustomButton(colPanel, ID_INPUT_PHASE + col, "Ø", true, wxSize(36, 15), wxColour(89, 155, 34));
 
-        btnCol->Add(cbMon[col], 0, wxBOTTOM, 1);
-        btnCol->Add(cb48V[col], 0, wxBOTTOM, 1);
-        btnCol->Add(cbInst[col], 0, wxBOTTOM, 1);
-        btnCol->Add(cbSolo[col], 0, wxBOTTOM, 1);
-        btnCol->Add(cbMute[col], 0, wxBOTTOM, 1);
-        btnCol->Add(cbPhase[col], 0, wxBOTTOM, 1);
+      midSizer->Add(faderSizer, 1, wxEXPAND | wxLEFT | wxRIGHT, 4);
+
+      wxBoxSizer *btnCol = new wxBoxSizer(wxVERTICAL);
+
+      if (col < 2) {
+        cbMon[col] = new CustomButton(colPanel, ID_INPUT_MON + col, "MON", true,
+                                      wxSize(44, 15), wxColour(89, 155, 34));
+        cb48V[col] = new CustomButton(colPanel, ID_INPUT_48V + col, "48V", true,
+                                      wxSize(44, 15), wxColour(192, 57, 43));
+        cbInst[col] =
+            new CustomButton(colPanel, ID_INPUT_INST + col, "INST", true,
+                             wxSize(44, 15), wxColour(89, 155, 34));
+
+        btnCol->Add(cbMon[col], 0, wxALIGN_CENTER | wxBOTTOM, 1);
+        btnCol->Add(cb48V[col], 0, wxALIGN_CENTER | wxBOTTOM, 1);
+        btnCol->Add(cbInst[col], 0, wxALIGN_CENTER | wxBOTTOM, 1);
+
+        cbSolo[col] =
+            new CustomButton(colPanel, ID_INPUT_SOLO + col, "SOLO", true,
+                             wxSize(44, 15), wxColour(241, 196, 15));
+        cbMute[col] =
+            new CustomButton(colPanel, ID_INPUT_MUTE + col, "MUTE", true,
+                             wxSize(44, 15), wxColour(192, 57, 43));
+        cbPhase[col] =
+            new CustomButton(colPanel, ID_INPUT_PHASE + col, "PHASE", true,
+                             wxSize(44, 15), wxColour(89, 155, 34));
+
+        btnCol->Add(cbSolo[col], 0, wxALIGN_CENTER | wxBOTTOM, 1);
+        btnCol->Add(cbMute[col], 0, wxALIGN_CENTER | wxBOTTOM, 1);
+        btnCol->Add(cbPhase[col], 0, wxALIGN_CENTER | wxBOTTOM, 1);
       } else {
-        btnLink = new CustomButton(colPanel, ID_INPUT_LINK, "Link", true, wxSize(36, 15), wxColour(29, 115, 201));
+        btnLink = new CustomButton(colPanel, ID_INPUT_LINK, "Link", true,
+                                   wxSize(36, 15), wxColour(29, 115, 201));
         btnLink->SetValue(true);
         btnCol->Add(btnLink, 0, wxBOTTOM, 4);
 
         // Combined Buttons Container
         combBtnSizer = new wxBoxSizer(wxVERTICAL);
-        cbSolo[col] = new CustomButton(colPanel, ID_INPUT_SOLO + 2, "SOLO", true, wxSize(36, 15), wxColour(241, 196, 15));
-        cbMute[col] = new CustomButton(colPanel, ID_INPUT_MUTE + 2, "MUTE", true, wxSize(36, 15), wxColour(192, 57, 43));
-        cbPhase[col] = new CustomButton(colPanel, ID_INPUT_PHASE + 2, "Ø", true, wxSize(36, 15), wxColour(89, 155, 34));
-        combBtnSizer->Add(cbSolo[col], 0, wxBOTTOM, 1);
-        combBtnSizer->Add(cbMute[col], 0, wxBOTTOM, 1);
-        combBtnSizer->Add(cbPhase[col], 0, wxBOTTOM, 1);
+        cbSolo[col] =
+            new CustomButton(colPanel, ID_INPUT_SOLO + 2, "SOLO", true,
+                             wxSize(44, 15), wxColour(241, 196, 15));
+        cbMute[col] =
+            new CustomButton(colPanel, ID_INPUT_MUTE + 2, "MUTE", true,
+                             wxSize(44, 15), wxColour(192, 57, 43));
+        cbPhase[col] =
+            new CustomButton(colPanel, ID_INPUT_PHASE + 2, "PHASE", true,
+                             wxSize(44, 15), wxColour(89, 155, 34));
+        combBtnSizer->Add(cbSolo[col], 0, wxALIGN_CENTER | wxBOTTOM, 1);
+        combBtnSizer->Add(cbMute[col], 0, wxALIGN_CENTER | wxBOTTOM, 1);
+        combBtnSizer->Add(cbPhase[col], 0, wxALIGN_CENTER | wxBOTTOM, 1);
         btnCol->Add(combBtnSizer, 0, wxEXPAND);
 
         // Split Buttons Container
         splitBtnSizer = new wxBoxSizer(wxHORIZONTAL);
-        
+
         wxBoxSizer *leftBtnCol = new wxBoxSizer(wxVERTICAL);
-        cbSoloL = new CustomButton(colPanel, ID_INPUT_SOLO + 2, "S", true, wxSize(18, 15), wxColour(241, 196, 15));
-        cbMuteL = new CustomButton(colPanel, ID_INPUT_MUTE + 2, "M", true, wxSize(18, 15), wxColour(192, 57, 43));
-        cbPhaseL = new CustomButton(colPanel, ID_INPUT_PHASE + 2, "Ø", true, wxSize(18, 15), wxColour(89, 155, 34));
-        leftBtnCol->Add(cbSoloL, 0, wxBOTTOM, 1);
-        leftBtnCol->Add(cbMuteL, 0, wxBOTTOM, 1);
-        leftBtnCol->Add(cbPhaseL, 0, wxBOTTOM, 1);
-        
+        cbSoloL = new CustomButton(colPanel, ID_INPUT_SOLO + 2, "SOLO", true,
+                                   wxSize(18, 15), wxColour(241, 196, 15));
+        cbMuteL = new CustomButton(colPanel, ID_INPUT_MUTE + 2, "MUTE", true,
+                                   wxSize(18, 15), wxColour(192, 57, 43));
+        cbPhaseL = new CustomButton(colPanel, ID_INPUT_PHASE + 2, "PHASE", true,
+                                    wxSize(18, 15), wxColour(89, 155, 34));
+        leftBtnCol->Add(cbSoloL, 0, wxEXPAND | wxBOTTOM, 1);
+        leftBtnCol->Add(cbMuteL, 0, wxEXPAND | wxBOTTOM, 1);
+        leftBtnCol->Add(cbPhaseL, 0, wxEXPAND | wxBOTTOM, 1);
+
         wxBoxSizer *rightBtnCol = new wxBoxSizer(wxVERTICAL);
-        cbSoloR = new CustomButton(colPanel, ID_INPUT_SOLO + 3, "S", true, wxSize(18, 15), wxColour(241, 196, 15));
-        cbMuteR = new CustomButton(colPanel, ID_INPUT_MUTE + 3, "M", true, wxSize(18, 15), wxColour(192, 57, 43));
-        cbPhaseR = new CustomButton(colPanel, ID_INPUT_PHASE + 3, "Ø", true, wxSize(18, 15), wxColour(89, 155, 34));
-        rightBtnCol->Add(cbSoloR, 0, wxBOTTOM, 1);
-        rightBtnCol->Add(cbMuteR, 0, wxBOTTOM, 1);
-        rightBtnCol->Add(cbPhaseR, 0, wxBOTTOM, 1);
+        cbSoloR = new CustomButton(colPanel, ID_INPUT_SOLO + 3, "SOLO", true,
+                                   wxSize(18, 15), wxColour(241, 196, 15));
+        cbMuteR = new CustomButton(colPanel, ID_INPUT_MUTE + 3, "MUTE", true,
+                                   wxSize(18, 15), wxColour(192, 57, 43));
+        cbPhaseR = new CustomButton(colPanel, ID_INPUT_PHASE + 3, "PHASE", true,
+                                    wxSize(18, 15), wxColour(89, 155, 34));
+        rightBtnCol->Add(cbSoloR, 0, wxEXPAND | wxBOTTOM, 1);
+        rightBtnCol->Add(cbMuteR, 0, wxEXPAND | wxBOTTOM, 1);
+        rightBtnCol->Add(cbPhaseR, 0, wxEXPAND | wxBOTTOM, 1);
 
         splitBtnSizer->Add(leftBtnCol, 1, wxEXPAND | wxRIGHT, 1);
         splitBtnSizer->Add(rightBtnCol, 1, wxEXPAND | wxLEFT, 1);
-        
+
         btnCol->Add(splitBtnSizer, 0, wxEXPAND);
-        splitBtnSizer->Show(false); 
+        splitBtnSizer->Show(false);
       }
-      
+
       midSizer->Add(btnCol, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
       colSizer->Add(midSizer, 1, wxEXPAND | wxTOP, 4);
-      
+
       // Peak Reset Button
-      lbPeaksI[col] = new CustomButton(colPanel, ID_INPUT_PEAK + col, "-120.0", false, wxSize(45, 14), wxColour(50, 50, 50));
+      lbPeaksI[col] =
+          new CustomButton(colPanel, ID_INPUT_PEAK + col, "-120.0", false,
+                           wxSize(45, 14), wxColour(50, 50, 50));
       lbPeaksI[col]->SetFont(lbPeaksI[col]->GetFont().Smaller());
       colSizer->Add(lbPeaksI[col], 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, 2);
-      
+
       // Bottom Panning Knob
-      slPanI[col] = new KnobControl(colPanel, wxID_ANY, "Pan", -100, 100, 0, wxSize(35, 42));
+      slPanI[col] = new KnobControl(colPanel, wxID_ANY, "Pan", -100, 100, 0,
+                                    wxSize(35, 42));
       colSizer->Add(slPanI[col], 0, wxALIGN_CENTER | wxBOTTOM, 2);
-      
+
       colPanel->SetSizer(colSizer);
       colPanel->SetMinSize(wxSize(120, -1));
       colsSizer->Add(colPanel, 0, wxEXPAND | wxALL, 2);
@@ -1738,12 +1952,12 @@ public:
 
   wxStaticText *lbTitle[N_MIX_SRCS / 2];
   wxStaticText *lbVolVal[N_MIX_SRCS / 2];
-  KnobControl *slPan[N_MIX_SRCS]; 
-  
-  FaderStrip *slVol[N_MIX_SRCS / 2]; 
-  FaderStrip *slVolL[N_MIX_SRCS / 2]; 
-  FaderStrip *slVolR[N_MIX_SRCS / 2]; 
-  CustomButton *btnLink[N_MIX_SRCS / 2]; 
+  KnobControl *slPan[N_MIX_SRCS];
+
+  FaderStrip *slVol[N_MIX_SRCS / 2];
+  FaderStrip *slVolL[N_MIX_SRCS / 2];
+  FaderStrip *slVolR[N_MIX_SRCS / 2];
+  CustomButton *btnLink[N_MIX_SRCS / 2];
 
   // Combined Buttons
   CustomButton *ckMute[N_MIX_SRCS / 2];
@@ -1755,7 +1969,7 @@ public:
   CustomButton *ckMuteR[N_MIX_SRCS / 2];
   CustomButton *ckSoloL[N_MIX_SRCS / 2];
   CustomButton *ckSoloR[N_MIX_SRCS / 2];
-  CustomButton *ckPhase[N_MIX_SRCS]; 
+  CustomButton *ckPhase[N_MIX_SRCS];
 
   wxBoxSizer *combBtnSizer[N_MIX_SRCS / 2];
   wxBoxSizer *splitBtnSizer[N_MIX_SRCS / 2];
@@ -1770,7 +1984,7 @@ public:
   const static int32_t maxGain = 6;
 
   const wxString Titles[N_MIX_SRCS / 2] = {
-      "IN1+2", "Disconnected", "Playback 1/2",
+      "IN1+2",        "Disconnected", "Playback 1/2",
       "Playback 3/4", "Playback 5/6", "Playback 7/8",
   };
 
@@ -1782,7 +1996,7 @@ public:
       dc.SetBackground(wxBrush(wxColour(33, 33, 33)));
       dc.Clear();
     });
-    
+
     for (size_t i = 0; i < N_MIX_SRCS; i++) {
       slPan[i] = nullptr;
       ckPhase[i] = nullptr;
@@ -1809,12 +2023,12 @@ public:
     lblTitle->SetFont(lblTitle->GetFont().Bold().Larger());
     lblTitle->SetForegroundColour(*wxWHITE);
     titleRow->Add(lblTitle, 0, wxLEFT | wxTOP, 6);
-    
+
     wxStaticText *lblBar = new wxStaticText(this, wxID_ANY, "  |");
     lblBar->SetFont(lblBar->GetFont().Bold().Larger());
     lblBar->SetForegroundColour(wxColour(80, 80, 80));
     titleRow->Add(lblBar, 0, wxTOP, 6);
-    
+
     tabBar = new wxPanel(this, wxID_ANY);
     tabBar->SetBackgroundColour(wxColour(33, 33, 33));
     tabBar->Bind(wxEVT_PAINT, [this](wxPaintEvent &evt) {
@@ -1823,29 +2037,27 @@ public:
       dc.Clear();
     });
     wxBoxSizer *tabSizer = new wxBoxSizer(wxHORIZONTAL);
-    
-    wxColour activeColors[4] = {
-      wxColour(89, 155, 34),   
-      wxColour(29, 115, 201),  
-      wxColour(241, 196, 15),  
-      wxColour(211, 84, 0)     
-    };
-    wxString mixNames[4] = { "Mix A", "Mix B", "Mix C", "Mix D" };
+
+    wxColour activeColors[4] = {wxColour(89, 155, 34), wxColour(29, 115, 201),
+                                wxColour(241, 196, 15), wxColour(211, 84, 0)};
+    wxString mixNames[4] = {"Mix A", "Mix B", "Mix C", "Mix D"};
 
     for (int i = 0; i < N_MIXERS; ++i) {
-      tabButtons[i] = new CustomButton(tabBar, ID_MIX_BUS_SEL + i, mixNames[i], true, wxSize(45, 18), activeColors[i]);
+      tabButtons[i] = new CustomButton(tabBar, ID_MIX_BUS_SEL + i, mixNames[i],
+                                       true, wxSize(45, 18), activeColors[i]);
       tabSizer->Add(tabButtons[i], 0, wxLEFT | wxRIGHT, 4);
     }
-    tabButtons[0]->SetValue(true); 
+    tabButtons[0]->SetValue(true);
     tabBar->SetSizer(tabSizer);
     titleRow->Add(tabBar, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, 10);
-    
+
     mainSizer->Add(titleRow, 0, wxBOTTOM, 4);
 
     wxBoxSizer *stripsSizer = new wxBoxSizer(wxHORIZONTAL);
 
     for (int i = 0; i < N_MIX_SRCS / 2; ++i) {
-      wxPanel *stripPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, "stripPanel");
+      wxPanel *stripPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition,
+                                        wxDefaultSize, 0, "stripPanel");
       stripPanel->SetBackgroundColour(wxColour(25, 25, 25));
       stripPanel->Bind(wxEVT_PAINT, [stripPanel](wxPaintEvent &evt) {
         wxPaintDC dc(stripPanel);
@@ -1854,7 +2066,9 @@ public:
       });
       wxBoxSizer *stripSizer = new wxBoxSizer(wxVERTICAL);
 
-      lbTitle[i] = new wxStaticText(stripPanel, wxID_ANY, Titles[i], wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbTitle[i] =
+          new wxStaticText(stripPanel, wxID_ANY, Titles[i], wxDefaultPosition,
+                           wxDefaultSize, wxALIGN_CENTER);
       lbTitle[i]->SetFont(lbTitle[i]->GetFont().Bold());
       lbTitle[i]->SetForegroundColour(wxColour(180, 180, 180));
       stripSizer->Add(lbTitle[i], 0, wxALIGN_CENTER | wxTOP, 4);
@@ -1867,53 +2081,65 @@ public:
       mixLevelVal[r] = LEVEL_MIN;
 
       wxBoxSizer *panRow = new wxBoxSizer(wxHORIZONTAL);
-      slPan[l] = new KnobControl(stripPanel, ID_MIX_PAN + l, "Pan L", -100, 100, -100, wxSize(20, 26));
-      slPan[r] = new KnobControl(stripPanel, ID_MIX_PAN + r, "Pan R", -100, 100, 100, wxSize(20, 26));
+      slPan[l] = new KnobControl(stripPanel, ID_MIX_PAN + l, "Pan L", -100, 100,
+                                 -100, wxSize(20, 26));
+      slPan[r] = new KnobControl(stripPanel, ID_MIX_PAN + r, "Pan R", -100, 100,
+                                 100, wxSize(20, 26));
       panRow->Add(slPan[l], 1, wxEXPAND | wxRIGHT, 1);
       panRow->Add(slPan[r], 1, wxEXPAND | wxLEFT, 1);
       stripSizer->Add(panRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 2);
 
       // Link Button
-      btnLink[i] = new CustomButton(stripPanel, ID_MIX_LINK + i, "Link", true, wxSize(36, 14), wxColour(29, 115, 201));
+      btnLink[i] = new CustomButton(stripPanel, ID_MIX_LINK + i, "Link", true,
+                                    wxSize(36, 14), wxColour(29, 115, 201));
       btnLink[i]->SetValue(i == 0 ? false : true);
       stripSizer->Add(btnLink[i], 0, wxALIGN_CENTER | wxTOP, 2);
 
       // Volume display text
-      lbVolVal[i] = new wxStaticText(stripPanel, wxID_ANY, "-inf  -inf", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbVolVal[i] =
+          new wxStaticText(stripPanel, wxID_ANY, "-inf  -inf",
+                           wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
       lbVolVal[i]->SetForegroundColour(wxColour(220, 220, 220));
       lbVolVal[i]->SetFont(lbVolVal[i]->GetFont().Smaller());
       stripSizer->Add(lbVolVal[i], 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, 2);
 
       // Horizontal fader sizer to hold linked fader OR split faders
       wxBoxSizer *faderSizer = new wxBoxSizer(wxHORIZONTAL);
-      slVol[i] = new FaderStrip(stripPanel, ID_MIX_VOL_B + i, minGain, maxGain, true, wxSize(50, 90));
-      slVolL[i] = new FaderStrip(stripPanel, ID_MIX_VOL + l, minGain, maxGain, false, wxSize(32, 90));
-      slVolR[i] = new FaderStrip(stripPanel, ID_MIX_VOL + r, minGain, maxGain, false, wxSize(32, 90));
-      
+      slVol[i] = new FaderStrip(stripPanel, ID_MIX_VOL_B + i, minGain, maxGain,
+                                true, wxSize(50, 90));
+      slVolL[i] = new FaderStrip(stripPanel, ID_MIX_VOL + l, minGain, maxGain,
+                                 false, wxSize(32, 90));
+      slVolL[i]->SetMeterOnRight(true);
+      slVolR[i] = new FaderStrip(stripPanel, ID_MIX_VOL + r, minGain, maxGain,
+                                 false, wxSize(32, 90));
+
       faderSizer->Add(slVolL[i], 1, wxEXPAND);
       faderSizer->Add(slVolR[i], 1, wxEXPAND);
       faderSizer->Add(slVol[i], 1, wxEXPAND);
-      
+
       if (i == 0) {
         slVol[i]->Hide();
       } else {
         slVolL[i]->Hide();
         slVolR[i]->Hide();
       }
-      
-      stripSizer->Add(faderSizer, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
+
+      stripSizer->Add(faderSizer, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
 
       // Buttons Container Zone
       wxBoxSizer *btnZoneSizer = new wxBoxSizer(wxVERTICAL);
 
       // 1. Combined Buttons
       combBtnSizer[i] = new wxBoxSizer(wxVERTICAL);
-      ckPhaseCombined[i] = new CustomButton(stripPanel, ID_MIX_PHASE + l, "Ø", true, wxSize(36, 13), wxColour(89, 155, 34));
-      ckSolo[i] = new CustomButton(stripPanel, ID_MIX_SOLO + i, "SOLO", true, wxSize(36, 15), wxColour(241, 196, 15));
-      ckMute[i] = new CustomButton(stripPanel, ID_MIX_MUTE + i, "MUTE", true, wxSize(36, 15), wxColour(192, 57, 43));
-      
-      if (i < 2 && pid == 0x8754) combBtnSizer[i]->Add(ckPhaseCombined[i], 0, wxALIGN_CENTER | wxBOTTOM, 2);
-      else ckPhaseCombined[i]->Hide();
+      ckPhaseCombined[i] =
+          new CustomButton(stripPanel, ID_MIX_PHASE + l, "PHASE", true,
+                           wxSize(44, 15), wxColour(89, 155, 34));
+      ckSolo[i] = new CustomButton(stripPanel, ID_MIX_SOLO + i, "SOLO", true,
+                                   wxSize(44, 15), wxColour(241, 196, 15));
+      ckMute[i] = new CustomButton(stripPanel, ID_MIX_MUTE + i, "MUTE", true,
+                                   wxSize(44, 15), wxColour(192, 57, 43));
+
+      combBtnSizer[i]->Add(ckPhaseCombined[i], 0, wxALIGN_CENTER | wxBOTTOM, 2);
 
       combBtnSizer[i]->Add(ckSolo[i], 0, wxALIGN_CENTER | wxBOTTOM, 1);
       combBtnSizer[i]->Add(ckMute[i], 0, wxALIGN_CENTER | wxBOTTOM, 1);
@@ -1924,38 +2150,45 @@ public:
 
       // 2. Split Buttons
       splitBtnSizer[i] = new wxBoxSizer(wxHORIZONTAL);
-      
+
       wxBoxSizer *lBtnCol = new wxBoxSizer(wxVERTICAL);
-      ckPhase[l] = new CustomButton(stripPanel, ID_MIX_PHASE + l, "Ø", true, wxSize(18, 13), wxColour(89, 155, 34));
-      ckSoloL[i] = new CustomButton(stripPanel, ID_MIX_SOLO + i, "S", true, wxSize(18, 15), wxColour(241, 196, 15));
-      ckMuteL[i] = new CustomButton(stripPanel, ID_MIX_MUTE + i, "M", true, wxSize(18, 15), wxColour(192, 57, 43));
-      if (i < 2 && pid == 0x8754) lBtnCol->Add(ckPhase[l], 0, wxBOTTOM, 1);
-      else ckPhase[l]->Hide();
-      lBtnCol->Add(ckSoloL[i], 0, wxBOTTOM, 1);
-      lBtnCol->Add(ckMuteL[i], 0, wxBOTTOM, 1);
+      ckPhase[l] = new CustomButton(stripPanel, ID_MIX_PHASE + l, "PHASE", true,
+                                    wxSize(18, 15), wxColour(89, 155, 34));
+      ckSoloL[i] = new CustomButton(stripPanel, ID_MIX_SOLO + i, "SOLO", true,
+                                    wxSize(18, 15), wxColour(241, 196, 15));
+      ckMuteL[i] = new CustomButton(stripPanel, ID_MIX_MUTE + i, "MUTE", true,
+                                    wxSize(18, 15), wxColour(192, 57, 43));
+      lBtnCol->Add(ckPhase[l], 0, wxEXPAND | wxBOTTOM, 1);
+      lBtnCol->Add(ckSoloL[i], 0, wxEXPAND | wxBOTTOM, 1);
+      lBtnCol->Add(ckMuteL[i], 0, wxEXPAND | wxBOTTOM, 1);
 
       wxBoxSizer *rBtnCol = new wxBoxSizer(wxVERTICAL);
-      ckPhase[r] = new CustomButton(stripPanel, ID_MIX_PHASE + r, "Ø", true, wxSize(18, 13), wxColour(89, 155, 34));
-      ckSoloR[i] = new CustomButton(stripPanel, ID_MIX_SOLO + (i + 10), "S", true, wxSize(18, 15), wxColour(241, 196, 15));
-      ckMuteR[i] = new CustomButton(stripPanel, ID_MIX_MUTE + (i + 10), "M", true, wxSize(18, 15), wxColour(192, 57, 43));
-      if (i < 2 && pid == 0x8754) rBtnCol->Add(ckPhase[r], 0, wxBOTTOM, 1);
-      else ckPhase[r]->Hide();
-      rBtnCol->Add(ckSoloR[i], 0, wxBOTTOM, 1);
-      rBtnCol->Add(ckMuteR[i], 0, wxBOTTOM, 1);
+      ckPhase[r] = new CustomButton(stripPanel, ID_MIX_PHASE + r, "PHASE", true,
+                                    wxSize(18, 15), wxColour(89, 155, 34));
+      ckSoloR[i] =
+          new CustomButton(stripPanel, ID_MIX_SOLO + (i + 10), "SOLO", true,
+                           wxSize(18, 15), wxColour(241, 196, 15));
+      ckMuteR[i] =
+          new CustomButton(stripPanel, ID_MIX_MUTE + (i + 10), "MUTE", true,
+                           wxSize(18, 15), wxColour(192, 57, 43));
+      rBtnCol->Add(ckPhase[r], 0, wxEXPAND | wxBOTTOM, 1);
+      rBtnCol->Add(ckSoloR[i], 0, wxEXPAND | wxBOTTOM, 1);
+      rBtnCol->Add(ckMuteR[i], 0, wxEXPAND | wxBOTTOM, 1);
 
       splitBtnSizer[i]->Add(lBtnCol, 1, wxEXPAND | wxRIGHT, 1);
       splitBtnSizer[i]->Add(rBtnCol, 1, wxEXPAND | wxLEFT, 1);
       btnZoneSizer->Add(splitBtnSizer[i], 0, wxEXPAND);
-      splitBtnSizer[i]->Show(i == 0 ? true : false); 
+      splitBtnSizer[i]->Show(i == 0 ? true : false);
 
-      stripSizer->Add(btnZoneSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 2);
+      stripSizer->Add(btnZoneSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM,
+                      2);
 
       stripPanel->SetSizer(stripSizer);
       stripsSizer->Add(stripPanel, 1, wxEXPAND | wxALL, 2);
     }
     mainSizer->Add(stripsSizer, 1, wxEXPAND);
-    SetMinSize(wxSize(680, -1));
-    SetMaxSize(wxSize(680, -1));
+    SetMinSize(wxSize(760, -1));
+    SetMaxSize(wxSize(760, -1));
     SetSizer(mainSizer);
   }
 };
@@ -1972,15 +2205,15 @@ public:
   wxStaticText *lbTitle[N_LOOPBACKS];
   wxComboBox *cbSelect[N_LOOPBACKS];
   wxStaticText *lbLoopVolVal[N_LOOPBACKS];
-  
-  FaderStrip *slOutput[N_LOOPBACKS]; 
-  FaderStrip *slOutputL[N_LOOPBACKS]; 
-  FaderStrip *slOutputR[N_LOOPBACKS]; 
-  CustomButton *btnLink[N_LOOPBACKS]; 
+
+  FaderStrip *slOutput[N_LOOPBACKS];
+  FaderStrip *slOutputL[N_LOOPBACKS];
+  FaderStrip *slOutputR[N_LOOPBACKS];
+  CustomButton *btnLink[N_LOOPBACKS];
 
   // Combined Mute
   CustomButton *ckMute[N_LOOPBACKS];
-  
+
   // Split Mutes
   CustomButton *ckMuteL[N_LOOPBACKS];
   CustomButton *ckMuteR[N_LOOPBACKS];
@@ -1991,19 +2224,20 @@ public:
   int32_t loopLevelVal[N_LOOPBACKS * 2];
 
   const wxString OutputSels[14] = {
-      "IN1", "IN2", "IN3", "IN4", "IN1+2", "IN3+4",
-      "Playback1+2", "Playback3+4", "Playback5+6",
-      "Playback7+8", "MIX A", "MIX B", "MIX C", "MIX D",
+      "IN1",   "IN2",         "IN3",         "IN4",         "IN1+2",
+      "IN3+4", "Playback1+2", "Playback3+4", "Playback5+6", "Playback7+8",
+      "MIX A", "MIX B",       "MIX C",       "MIX D",
   };
 
-  PanelLoopbacks(wxWindow *parent, uint16_t pid = 0x8754) : wxPanel(parent, wxID_ANY) {
+  PanelLoopbacks(wxWindow *parent, uint16_t pid = 0x8754)
+      : wxPanel(parent, wxID_ANY) {
     SetBackgroundColour(wxColour(33, 33, 33));
     Bind(wxEVT_PAINT, [this](wxPaintEvent &evt) {
       wxPaintDC dc(this);
       dc.SetBackground(wxBrush(wxColour(33, 33, 33)));
       dc.Clear();
     });
-    
+
     for (size_t i = 0; i < N_LOOPBACKS; i++) {
       lbTitle[i] = nullptr;
       cbSelect[i] = nullptr;
@@ -2025,19 +2259,20 @@ public:
     lblTitle->SetFont(lblTitle->GetFont().Bold().Larger());
     lblTitle->SetForegroundColour(*wxWHITE);
     titleRow->Add(lblTitle, 0, wxLEFT | wxTOP, 6);
-    
+
     wxStaticText *lblBar = new wxStaticText(this, wxID_ANY, "  |");
     lblBar->SetFont(lblBar->GetFont().Bold().Larger());
     lblBar->SetForegroundColour(wxColour(80, 80, 80));
     titleRow->Add(lblBar, 0, wxTOP, 6);
-    
+
     mainSizer->Add(titleRow, 0, wxBOTTOM, 4);
 
     wxBoxSizer *stripsSizer = new wxBoxSizer(wxHORIZONTAL);
 
     int numStrips = 3;
     for (int i = 0; i < numStrips; ++i) {
-      wxPanel *stripPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, "stripPanel");
+      wxPanel *stripPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition,
+                                        wxDefaultSize, 0, "stripPanel");
       stripPanel->SetBackgroundColour(wxColour(25, 25, 25));
       stripPanel->Bind(wxEVT_PAINT, [stripPanel](wxPaintEvent &evt) {
         wxPaintDC dc(stripPanel);
@@ -2046,34 +2281,47 @@ public:
       });
       wxBoxSizer *stripSizer = new wxBoxSizer(wxVERTICAL);
 
-      lbTitle[i] = new wxStaticText(stripPanel, wxID_ANY, std::format("Loopback {}+{}", i*2+1, i*2+2), wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbTitle[i] =
+          new wxStaticText(stripPanel, wxID_ANY,
+                           std::format("Loopback {}+{}", i * 2 + 1, i * 2 + 2),
+                           wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
       lbTitle[i]->SetFont(lbTitle[i]->GetFont().Bold());
       lbTitle[i]->SetForegroundColour(wxColour(180, 180, 180));
       stripSizer->Add(lbTitle[i], 0, wxALIGN_CENTER | wxTOP, 4);
 
-      cbSelect[i] = new wxComboBox(stripPanel, ID_LOOP_SEL + i, OutputSels[10 + i], wxDefaultPosition, wxSize(80, -1), 14, OutputSels, wxCB_READONLY);
+      cbSelect[i] = new wxComboBox(
+          stripPanel, ID_LOOP_SEL + i, OutputSels[10 + i], wxDefaultPosition,
+          wxSize(80, -1), 14, OutputSels, wxCB_READONLY);
       stripSizer->Add(cbSelect[i], 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 2);
 
       // Link Button
-      btnLink[i] = new CustomButton(stripPanel, ID_LOOP_LINK + i, "Link", true, wxSize(36, 14), wxColour(29, 115, 201));
+      btnLink[i] = new CustomButton(stripPanel, ID_LOOP_LINK + i, "Link", true,
+                                    wxSize(36, 14), wxColour(29, 115, 201));
       btnLink[i]->SetValue(true);
       stripSizer->Add(btnLink[i], 0, wxALIGN_CENTER | wxTOP, 2);
 
       // Volume display text
-      lbLoopVolVal[i] = new wxStaticText(stripPanel, wxID_ANY, "-inf  -inf", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbLoopVolVal[i] =
+          new wxStaticText(stripPanel, wxID_ANY, "-inf  -inf",
+                           wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
       lbLoopVolVal[i]->SetForegroundColour(wxColour(220, 220, 220));
       lbLoopVolVal[i]->SetFont(lbLoopVolVal[i]->GetFont().Smaller());
       stripSizer->Add(lbLoopVolVal[i], 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, 2);
 
       wxBoxSizer *faderSizer = new wxBoxSizer(wxHORIZONTAL);
-      slOutput[i] = new FaderStrip(stripPanel, ID_LOOP_VOL_B + i, minGain, maxGain, true, wxSize(50, 95));
-      slOutputL[i] = new FaderStrip(stripPanel, ID_LOOP_VOL_L + i, minGain, maxGain, false, wxSize(32, 95));
-      slOutputR[i] = new FaderStrip(stripPanel, ID_LOOP_VOL_R + i, minGain, maxGain, false, wxSize(32, 95));
-      
+      slOutput[i] = new FaderStrip(stripPanel, ID_LOOP_VOL_B + i, minGain,
+                                   maxGain, true, wxSize(50, 95));
+      slOutputL[i] = new FaderStrip(stripPanel, ID_LOOP_VOL_L + i, minGain,
+                                    maxGain, false, wxSize(32, 95));
+      slOutputL[i]->SetMeterOnRight(true);
+      slOutputR[i] = new FaderStrip(stripPanel, ID_LOOP_VOL_R + i, minGain,
+                                    maxGain, false, wxSize(32, 95));
+
       faderSizer->Add(slOutputL[i], 1, wxEXPAND);
+
       faderSizer->Add(slOutputR[i], 1, wxEXPAND);
       faderSizer->Add(slOutput[i], 1, wxEXPAND);
-      
+
       slOutputL[i]->Hide();
       slOutputR[i]->Hide();
 
@@ -2083,26 +2331,31 @@ public:
       wxBoxSizer *btnZoneSizer = new wxBoxSizer(wxVERTICAL);
 
       combBtnSizer[i] = new wxBoxSizer(wxVERTICAL);
-      ckMute[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + i, "MUTE", true, wxSize(36, 16), wxColour(192, 57, 43));
+      ckMute[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + i, "MUTE", true,
+                                   wxSize(36, 16), wxColour(192, 57, 43));
       combBtnSizer[i]->Add(ckMute[i], 0, wxALIGN_CENTER);
       btnZoneSizer->Add(combBtnSizer[i], 0, wxEXPAND);
 
       splitBtnSizer[i] = new wxBoxSizer(wxHORIZONTAL);
-      ckMuteL[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + i, "M", true, wxSize(18, 16), wxColour(192, 57, 43));
-      ckMuteR[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + (i + 10), "M", true, wxSize(18, 16), wxColour(192, 57, 43));
+      ckMuteL[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + i, "MUTE", true,
+                                    wxSize(18, 16), wxColour(192, 57, 43));
+      ckMuteR[i] =
+          new CustomButton(stripPanel, ID_LOOP_MUTE + (i + 10), "MUTE", true,
+                           wxSize(18, 16), wxColour(192, 57, 43));
       splitBtnSizer[i]->Add(ckMuteL[i], 1, wxEXPAND | wxRIGHT, 1);
       splitBtnSizer[i]->Add(ckMuteR[i], 1, wxEXPAND | wxLEFT, 1);
       btnZoneSizer->Add(splitBtnSizer[i], 0, wxEXPAND);
-      splitBtnSizer[i]->Show(false); 
+      splitBtnSizer[i]->Show(false);
 
-      stripSizer->Add(btnZoneSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
+      stripSizer->Add(btnZoneSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM,
+                      4);
 
       loopLevelVal[i * 2] = LEVEL_MIN;
       loopLevelVal[i * 2 + 1] = LEVEL_MIN;
 
       stripPanel->SetSizer(stripSizer);
       stripPanel->SetMinSize(wxSize(120, -1));
-      stripsSizer->Add(stripPanel, 0, wxEXPAND | wxALL, 2);
+      stripsSizer->Add(stripPanel, 0, wxEXPAND | wxALL, 4);
     }
     stripsSizer->AddStretchSpacer(1);
     mainSizer->Add(stripsSizer, 1, wxEXPAND);
@@ -2125,11 +2378,11 @@ public:
   wxStaticText *lbTitle[N_OUTPUTS];
   wxComboBox *cbSelect[N_OUTPUTS];
   wxStaticText *lbOutVolVal[N_OUTPUTS];
-  
-  FaderStrip *slOutput[N_OUTPUTS]; 
-  FaderStrip *slOutputL[N_OUTPUTS]; 
-  FaderStrip *slOutputR[N_OUTPUTS]; 
-  CustomButton *btnLink[N_OUTPUTS]; 
+
+  FaderStrip *slOutput[N_OUTPUTS];
+  FaderStrip *slOutputL[N_OUTPUTS];
+  FaderStrip *slOutputR[N_OUTPUTS];
+  CustomButton *btnLink[N_OUTPUTS];
 
   // Combined Mutes
   CustomButton *ckMute[N_OUTPUTS];
@@ -2143,21 +2396,28 @@ public:
 
   CustomButton *btnTRS[2];
   CustomButton *btnAUX[2];
-  CustomButton *btnPhoneIcon[2]; 
+  CustomButton *btnPhoneIcon[2];
 
   KnobControl *mixKnob;
   CustomButton *btnPhoneGain;
   wxChoice *choicePhoneOut;
   wxStaticText *lblMixVal;
 
+  void updatePhoneMixLabel(int val) {
+    if (!lblMixVal) return;
+    int inputPct = 50 - val / 2;
+    int playPct = 50 + val / 2;
+    lblMixVal->SetLabel(std::format("Level: {}/{}", inputPct, playPct));
+  }
+
   int32_t outLevelVal[N_OUTPUTS * 2];
   int m_phoneMix[2];
   bool m_phoneGain[2];
 
   const wxString OutputSels[14] = {
-      "IN1", "IN2", "IN3", "IN4", "IN1+2", "IN3+4",
-      "Playback1+2", "Playback3+4", "Playback5+6",
-      "Playback7+8", "MIX A", "MIX B", "MIX C", "MIX D",
+      "IN1",   "IN2",         "IN3",         "IN4",         "IN1+2",
+      "IN3+4", "Playback1+2", "Playback3+4", "Playback5+6", "Playback7+8",
+      "MIX A", "MIX B",       "MIX C",       "MIX D",
   };
 
   PanelOutputs(wxWindow *parent, uint16_t pid = 0x8754)
@@ -2168,7 +2428,7 @@ public:
       dc.SetBackground(wxBrush(wxColour(33, 33, 33)));
       dc.Clear();
     });
-    
+
     // Safety null initializations
     for (size_t i = 0; i < N_OUTPUTS; i++) {
       lbTitle[i] = nullptr;
@@ -2196,12 +2456,12 @@ public:
     lblTitle->SetFont(lblTitle->GetFont().Bold().Larger());
     lblTitle->SetForegroundColour(*wxWHITE);
     titleRow->Add(lblTitle, 0, wxLEFT | wxTOP, 6);
-    
+
     wxStaticText *lblBar = new wxStaticText(this, wxID_ANY, "  |");
     lblBar->SetFont(lblBar->GetFont().Bold().Larger());
     lblBar->SetForegroundColour(wxColour(80, 80, 80));
     titleRow->Add(lblBar, 0, wxTOP, 6);
-    
+
     mainSizer->Add(titleRow, 0, wxBOTTOM, 4);
 
     wxBoxSizer *stripsSizer = new wxBoxSizer(wxHORIZONTAL);
@@ -2209,12 +2469,15 @@ public:
     bool isOTG = (pid == 0x8755 || pid == 0x8756);
     bool isE2x2 = (pid == 0x8752);
 
-    int numStrips = 3; 
-    if (isE2x2) numStrips = 1;
-    else if (isOTG) numStrips = 2; 
+    int numStrips = 3;
+    if (isE2x2)
+      numStrips = 1;
+    else if (isOTG)
+      numStrips = 2;
 
     for (int i = 0; i < numStrips; ++i) {
-      wxPanel *stripPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, "stripPanel");
+      wxPanel *stripPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition,
+                                        wxDefaultSize, 0, "stripPanel");
       stripPanel->SetBackgroundColour(wxColour(25, 25, 25));
       stripPanel->Bind(wxEVT_PAINT, [stripPanel](wxPaintEvent &evt) {
         wxPaintDC dc(stripPanel);
@@ -2224,39 +2487,56 @@ public:
       wxBoxSizer *stripSizer = new wxBoxSizer(wxVERTICAL);
 
       wxString name;
-      if (i == 0) name = "Output 1+2";
-      else if (i == 1 && isOTG) name = "Mobile OUT";
-      else if (i == 1) name = "Disconnected";
-      else name = "S/PDIF OUT";
+      if (i == 0)
+        name = "Output 1+2";
+      else if (i == 1 && isOTG)
+        name = "Mobile OUT";
+      else if (i == 1)
+        name = "Disconnected";
+      else
+        name = "S/PDIF OUT";
 
-      lbTitle[i] = new wxStaticText(stripPanel, wxID_ANY, name, wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbTitle[i] =
+          new wxStaticText(stripPanel, wxID_ANY, name, wxDefaultPosition,
+                           wxDefaultSize, wxALIGN_CENTER);
       lbTitle[i]->SetFont(lbTitle[i]->GetFont().Bold());
       lbTitle[i]->SetForegroundColour(wxColour(180, 180, 180));
       stripSizer->Add(lbTitle[i], 0, wxALIGN_CENTER | wxTOP, 4);
 
-      cbSelect[i] = new wxComboBox(stripPanel, ID_OUTPUT_SEL + i, OutputSels[6], wxDefaultPosition, wxSize(80, -1), 14, OutputSels, wxCB_READONLY);
+      cbSelect[i] = new wxComboBox(stripPanel, ID_OUTPUT_SEL + i, OutputSels[6],
+                                   wxDefaultPosition, wxSize(80, -1), 14,
+                                   OutputSels, wxCB_READONLY);
       stripSizer->Add(cbSelect[i], 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 2);
 
       // Link Button
-      btnLink[i] = new CustomButton(stripPanel, ID_OUTPUT_LINK + i, "Link", true, wxSize(36, 14), wxColour(29, 115, 201));
+      btnLink[i] =
+          new CustomButton(stripPanel, ID_OUTPUT_LINK + i, "Link", true,
+                           wxSize(36, 14), wxColour(29, 115, 201));
       btnLink[i]->SetValue(true);
       stripSizer->Add(btnLink[i], 0, wxALIGN_CENTER | wxTOP, 2);
 
       // Volume display text
-      lbOutVolVal[i] = new wxStaticText(stripPanel, wxID_ANY, "-inf  -inf", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbOutVolVal[i] =
+          new wxStaticText(stripPanel, wxID_ANY, "-inf  -inf",
+                           wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
       lbOutVolVal[i]->SetForegroundColour(wxColour(220, 220, 220));
       lbOutVolVal[i]->SetFont(lbOutVolVal[i]->GetFont().Smaller());
       stripSizer->Add(lbOutVolVal[i], 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, 2);
 
       wxBoxSizer *faderSizer = new wxBoxSizer(wxHORIZONTAL);
-      slOutput[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_B + i, minGain, maxGain, true, wxSize(50, 90));
-      slOutputL[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_L + i, minGain, maxGain, false, wxSize(32, 90));
-      slOutputR[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_R + i, minGain, maxGain, false, wxSize(32, 90));
-      
+      slOutput[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_B + i, minGain,
+                                   maxGain, true, wxSize(50, 90));
+      slOutputL[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_L + i, minGain,
+                                    maxGain, false, wxSize(32, 90));
+      slOutputL[i]->SetMeterOnRight(true);
+      slOutputR[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_R + i, minGain,
+                                    maxGain, false, wxSize(32, 90));
+
       faderSizer->Add(slOutputL[i], 1, wxEXPAND);
+
       faderSizer->Add(slOutputR[i], 1, wxEXPAND);
       faderSizer->Add(slOutput[i], 1, wxEXPAND);
-      
+
       slOutputL[i]->Hide();
       slOutputR[i]->Hide();
 
@@ -2264,39 +2544,50 @@ public:
 
       if (i == 0) {
         wxBoxSizer *btnRow = new wxBoxSizer(wxHORIZONTAL);
-        
-        btnPhoneIcon[0] = new CustomButton(stripPanel, ID_OUTPUT_MON + 0, "", true, wxSize(14, 16), wxColour(29, 115, 201), ICON_HEADPHONE);
-        btnTRS[0] = new CustomButton(stripPanel, ID_OUTPUT_LINE + 0, "TRS", true, wxSize(14, 16));
-        
+
+        btnPhoneIcon[0] = new CustomButton(
+            stripPanel, ID_OUTPUT_MON + 0, "", true, wxSize(14, 16),
+            wxColour(29, 115, 201), ICON_HEADPHONE);
+        btnTRS[0] = new CustomButton(stripPanel, ID_OUTPUT_LINE + 0, "TRS",
+                                     true, wxSize(14, 16));
+
         btnRow->Add(btnPhoneIcon[0], 1, wxEXPAND | wxRIGHT, 1);
         btnRow->Add(btnTRS[0], 1, wxEXPAND | wxRIGHT, 1);
 
         if (pid != 0x8755) {
-          btnAUX[0] = new CustomButton(stripPanel, ID_OUTPUT_LINE + 1, "AUX", true, wxSize(14, 16));
+          btnAUX[0] = new CustomButton(stripPanel, ID_OUTPUT_LINE + 1, "AUX",
+                                       true, wxSize(14, 16));
           btnRow->Add(btnAUX[0], 1, wxEXPAND);
         } else {
           btnAUX[0] = nullptr;
         }
-        
+
         stripSizer->Add(btnRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
       } else {
         // Mute Buttons Container Zone
         wxBoxSizer *btnZoneSizer = new wxBoxSizer(wxVERTICAL);
 
         combBtnSizer[i] = new wxBoxSizer(wxVERTICAL);
-        ckMute[i] = new CustomButton(stripPanel, ID_OUTPUT_MON + i, "MUTE", true, wxSize(36, 16), wxColour(192, 57, 43));
+        ckMute[i] =
+            new CustomButton(stripPanel, ID_OUTPUT_MON + i, "MUTE", true,
+                             wxSize(36, 16), wxColour(192, 57, 43));
         combBtnSizer[i]->Add(ckMute[i], 0, wxALIGN_CENTER);
         btnZoneSizer->Add(combBtnSizer[i], 0, wxEXPAND);
 
         splitBtnSizer[i] = new wxBoxSizer(wxHORIZONTAL);
-        ckMuteL[i] = new CustomButton(stripPanel, ID_OUTPUT_MON + i, "M", true, wxSize(18, 16), wxColour(192, 57, 43));
-        ckMuteR[i] = new CustomButton(stripPanel, ID_OUTPUT_MON + (i + 10), "M", true, wxSize(18, 16), wxColour(192, 57, 43));
+        ckMuteL[i] =
+            new CustomButton(stripPanel, ID_OUTPUT_MON + i, "MUTE", true,
+                             wxSize(18, 16), wxColour(192, 57, 43));
+        ckMuteR[i] =
+            new CustomButton(stripPanel, ID_OUTPUT_MON + (i + 10), "MUTE", true,
+                             wxSize(18, 16), wxColour(192, 57, 43));
         splitBtnSizer[i]->Add(ckMuteL[i], 1, wxEXPAND | wxRIGHT, 1);
         splitBtnSizer[i]->Add(ckMuteR[i], 1, wxEXPAND | wxLEFT, 1);
         btnZoneSizer->Add(splitBtnSizer[i], 0, wxEXPAND);
-        splitBtnSizer[i]->Show(false); 
+        splitBtnSizer[i]->Show(false);
 
-        stripSizer->Add(btnZoneSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
+        stripSizer->Add(btnZoneSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM,
+                        4);
       }
 
       outLevelVal[i * 2] = LEVEL_MIN;
@@ -2304,12 +2595,13 @@ public:
 
       stripPanel->SetSizer(stripSizer);
       stripPanel->SetMinSize(wxSize(120, -1));
-      stripsSizer->Add(stripPanel, 0, wxEXPAND | wxALL, 2);
+      stripsSizer->Add(stripPanel, 0, wxEXPAND | wxALL, 4);
     }
 
     stripsSizer->AddStretchSpacer(1);
 
-    wxPanel *monMixPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, "monMixPanel");
+    wxPanel *monMixPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition,
+                                       wxDefaultSize, 0, "monMixPanel");
     monMixPanel->SetBackgroundColour(wxColour(33, 33, 33));
     monMixPanel->Bind(wxEVT_PAINT, [monMixPanel](wxPaintEvent &evt) {
       wxPaintDC dc(monMixPanel);
@@ -2318,12 +2610,15 @@ public:
     });
     wxBoxSizer *monMixSizer = new wxBoxSizer(wxVERTICAL);
 
-    wxStaticText *lblMonTitle = new wxStaticText(monMixPanel, wxID_ANY, "Monitor Mix", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+    wxStaticText *lblMonTitle =
+        new wxStaticText(monMixPanel, wxID_ANY, "Monitor Mix",
+                         wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
     lblMonTitle->SetFont(lblMonTitle->GetFont().Bold());
     lblMonTitle->SetForegroundColour(wxColour(180, 180, 180));
     monMixSizer->Add(lblMonTitle, 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, 4);
 
-    mixKnob = new KnobControl(monMixPanel, ID_PHONE_MIX, "Mix", -100, 100, 0, wxSize(60, 70));
+    mixKnob = new KnobControl(monMixPanel, ID_PHONE_MIX, "Mix", -100, 100, 0,
+                              wxSize(60, 70));
     monMixSizer->Add(mixKnob, 0, wxALIGN_CENTER | wxBOTTOM, 2);
 
     wxBoxSizer *lblRow = new wxBoxSizer(wxHORIZONTAL);
@@ -2337,22 +2632,30 @@ public:
     lblRow->Add(lblPlay, 0);
     monMixSizer->Add(lblRow, 0, wxALIGN_CENTER | wxBOTTOM, 6);
 
-    choicePhoneOut = new wxChoice(monMixPanel, ID_PHONE_SEL, wxDefaultPosition, wxSize(80, -1));
+    choicePhoneOut = new wxChoice(monMixPanel, ID_PHONE_SEL, wxDefaultPosition,
+                                  wxSize(80, -1));
     choicePhoneOut->Append("Phone 1");
     choicePhoneOut->Append("Phone 2");
     choicePhoneOut->SetSelection(0);
     monMixSizer->Add(choicePhoneOut, 0, wxALIGN_CENTER | wxBOTTOM, 6);
 
-    lblMixVal = new wxStaticText(monMixPanel, wxID_ANY, "Level: 0dBu", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+    lblMixVal =
+        new wxStaticText(monMixPanel, wxID_ANY, "Level: 0dBu",
+                         wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
     lblMixVal->SetForegroundColour(wxColour(140, 140, 140));
     lblMixVal->SetFont(lblMixVal->GetFont().Smaller());
     monMixSizer->Add(lblMixVal, 0, wxALIGN_CENTER | wxBOTTOM, 4);
 
-    btnPhoneGain = new CustomButton(monMixPanel, ID_PHONE_GAIN, "Gain", true, wxSize(50, 18), wxColour(29, 115, 201));
+    btnPhoneGain = new CustomButton(monMixPanel, ID_PHONE_GAIN, "Gain", true,
+                                    wxSize(50, 18), wxColour(29, 115, 201));
     monMixSizer->Add(btnPhoneGain, 0, wxALIGN_CENTER | wxBOTTOM, 6);
 
-    m_phoneMix[0] = 0; m_phoneMix[1] = 0;
-    m_phoneGain[0] = false; m_phoneGain[1] = false;
+    m_phoneMix[0] = 0;
+    m_phoneMix[1] = 0;
+    m_phoneGain[0] = false;
+    m_phoneGain[1] = false;
+
+    mixKnob->Enable(pid == 0x8754);
 
     monMixPanel->SetSizer(monMixSizer);
     stripsSizer->Add(monMixPanel, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 2);
@@ -2362,11 +2665,13 @@ public:
     SetMinSize(wxSize(panelWidth, -1));
     SetMaxSize(wxSize(panelWidth, -1));
     SetSizer(mainSizer);
-    
+
     choicePhoneOut->Bind(wxEVT_CHOICE, [this](wxCommandEvent &evt) {
       int idx = choicePhoneOut->GetSelection();
-      if (idx == wxNOT_FOUND) return;
+      if (idx == wxNOT_FOUND)
+        return;
       mixKnob->SetValue(m_phoneMix[idx]);
+      updatePhoneMixLabel(m_phoneMix[idx]);
       btnPhoneGain->SetValue(m_phoneGain[idx]);
     });
   }
@@ -2401,7 +2706,7 @@ protected:
 
   std::thread *thReader;
   hid_device *handle;
-  
+
   void scbUpdateLevels(uint16_t ch16, int32_t val);
   void pushGuiStateToDevice();
   void HidReader(hid_device *handle);
@@ -2413,22 +2718,35 @@ protected:
   void setOutputVol(int32_t ch) {
     int32_t l = ch * 2;
     int32_t r = l + 1;
-    bool linked = panelOutputs->btnLink[ch] ? panelOutputs->btnLink[ch]->GetValue() : true;
+    bool linked = panelOutputs->btnLink[ch]
+                      ? panelOutputs->btnLink[ch]->GetValue()
+                      : true;
     bool mute = false, muteL = false, muteR = false;
     if (ch > 0) {
-      mute = panelOutputs->ckMute[ch] ? panelOutputs->ckMute[ch]->GetValue() : false;
-      muteL = panelOutputs->ckMuteL[ch] ? panelOutputs->ckMuteL[ch]->GetValue() : false;
-      muteR = panelOutputs->ckMuteR[ch] ? panelOutputs->ckMuteR[ch]->GetValue() : false;
+      mute = panelOutputs->ckMute[ch] ? panelOutputs->ckMute[ch]->GetValue()
+                                      : false;
+      muteL = panelOutputs->ckMuteL[ch] ? panelOutputs->ckMuteL[ch]->GetValue()
+                                        : false;
+      muteR = panelOutputs->ckMuteR[ch] ? panelOutputs->ckMuteR[ch]->GetValue()
+                                        : false;
     }
     if (linked) {
       if (panelOutputs->slOutput[ch]) {
-        hid->setOutputVol(l, gain->getMonoGain(panelOutputs->slOutput[ch]->GetValue(), mute, false, false, false));
-        hid->setOutputVol(r, gain->getMonoGain(panelOutputs->slOutput[ch]->GetValue(), mute, false, false, false));
+        hid->setOutputVol(
+            l, gain->getMonoGain(panelOutputs->slOutput[ch]->GetValue(), mute,
+                                 false, false, false));
+        hid->setOutputVol(
+            r, gain->getMonoGain(panelOutputs->slOutput[ch]->GetValue(), mute,
+                                 false, false, false));
       }
     } else {
       if (panelOutputs->slOutputL[ch] && panelOutputs->slOutputR[ch]) {
-        hid->setOutputVol(l, gain->getMonoGain(panelOutputs->slOutputL[ch]->GetValue(), muteL, false, false, false));
-        hid->setOutputVol(r, gain->getMonoGain(panelOutputs->slOutputR[ch]->GetValue(), muteR, false, false, false));
+        hid->setOutputVol(
+            l, gain->getMonoGain(panelOutputs->slOutputL[ch]->GetValue(), muteL,
+                                 false, false, false));
+        hid->setOutputVol(
+            r, gain->getMonoGain(panelOutputs->slOutputR[ch]->GetValue(), muteR,
+                                 false, false, false));
       }
     }
   };
@@ -2436,19 +2754,35 @@ protected:
   void setLoopVol(int32_t ch) {
     int32_t l = ch * 2;
     int32_t r = l + 1;
-    bool linked = panelLoopbacks->btnLink[ch] ? panelLoopbacks->btnLink[ch]->GetValue() : true;
+    bool linked = panelLoopbacks->btnLink[ch]
+                      ? panelLoopbacks->btnLink[ch]->GetValue()
+                      : true;
     if (linked) {
-      bool mute = panelLoopbacks->ckMute[ch] ? panelLoopbacks->ckMute[ch]->GetValue() : false;
+      bool mute = panelLoopbacks->ckMute[ch]
+                      ? panelLoopbacks->ckMute[ch]->GetValue()
+                      : false;
       if (panelLoopbacks->slOutput[ch]) {
-        hid->setLoopVol(l, gain->getMonoGain(panelLoopbacks->slOutput[ch]->GetValue(), mute, false, false, false));
-        hid->setLoopVol(r, gain->getMonoGain(panelLoopbacks->slOutput[ch]->GetValue(), mute, false, false, false));
+        hid->setLoopVol(
+            l, gain->getMonoGain(panelLoopbacks->slOutput[ch]->GetValue(), mute,
+                                 false, false, false));
+        hid->setLoopVol(
+            r, gain->getMonoGain(panelLoopbacks->slOutput[ch]->GetValue(), mute,
+                                 false, false, false));
       }
     } else {
-      bool muteL = panelLoopbacks->ckMuteL[ch] ? panelLoopbacks->ckMuteL[ch]->GetValue() : false;
-      bool muteR = panelLoopbacks->ckMuteR[ch] ? panelLoopbacks->ckMuteR[ch]->GetValue() : false;
+      bool muteL = panelLoopbacks->ckMuteL[ch]
+                       ? panelLoopbacks->ckMuteL[ch]->GetValue()
+                       : false;
+      bool muteR = panelLoopbacks->ckMuteR[ch]
+                       ? panelLoopbacks->ckMuteR[ch]->GetValue()
+                       : false;
       if (panelLoopbacks->slOutputL[ch] && panelLoopbacks->slOutputR[ch]) {
-        hid->setLoopVol(l, gain->getMonoGain(panelLoopbacks->slOutputL[ch]->GetValue(), muteL, false, false, false));
-        hid->setLoopVol(r, gain->getMonoGain(panelLoopbacks->slOutputR[ch]->GetValue(), muteR, false, false, false));
+        hid->setLoopVol(
+            l, gain->getMonoGain(panelLoopbacks->slOutputL[ch]->GetValue(),
+                                 muteL, false, false, false));
+        hid->setLoopVol(
+            r, gain->getMonoGain(panelLoopbacks->slOutputR[ch]->GetValue(),
+                                 muteR, false, false, false));
       }
     }
   };
@@ -2499,42 +2833,52 @@ protected:
   void sendInput(int32_t ch, bool hw = true, int16_t evtID = 0) {
     int32_t begin = ch, end = ch + 1;
     bool anySolo = false;
-    
-    int col = ch;
-    if (ch >= 2) col = 2; 
 
-    bool linked = (col == 2 && panelInputs->btnLink) ? panelInputs->btnLink->GetValue() : true;
+    int col = ch;
+    if (ch >= 2)
+      col = 2;
+
+    bool linked = (col == 2 && panelInputs->btnLink)
+                      ? panelInputs->btnLink->GetValue()
+                      : true;
     int32_t gainDB = 0;
     if (col < 2) {
-      if (panelInputs->slGainI[col]) gainDB = panelInputs->slGainI[col]->GetValue();
+      if (panelInputs->slGainI[col])
+        gainDB = panelInputs->slGainI[col]->GetValue();
     } else {
       if (linked) {
-        if (panelInputs->slGainICombined) gainDB = panelInputs->slGainICombined->GetValue();
+        if (panelInputs->slGainICombined)
+          gainDB = panelInputs->slGainICombined->GetValue();
       } else {
-        if (panelInputs->slGainI[ch]) gainDB = panelInputs->slGainI[ch]->GetValue();
+        if (panelInputs->slGainI[ch])
+          gainDB = panelInputs->slGainI[ch]->GetValue();
       }
     }
-    
+
     for (int32_t i = 0; i < 3; i++) {
       if (panelInputs->cbSolo[i]) {
         anySolo |= panelInputs->cbSolo[i]->GetValue();
       }
     }
     // Also include split solo keys
-    if (panelInputs->cbSoloL && panelInputs->cbSoloL->GetValue()) anySolo = true;
-    if (panelInputs->cbSoloR && panelInputs->cbSoloR->GetValue()) anySolo = true;
-    
+    if (panelInputs->cbSoloL && panelInputs->cbSoloL->GetValue())
+      anySolo = true;
+    if (panelInputs->cbSoloR && panelInputs->cbSoloR->GetValue())
+      anySolo = true;
+
     if (ch < 0) {
       begin = 0;
       end = panelInputs->N_INPUTS;
     }
-    
+
     for (int32_t i = begin; i < end; i++) {
       int colMap = (i >= 2) ? 2 : i;
-      
-      bool mon = panelInputs->cbMon[colMap] ? panelInputs->cbMon[colMap]->GetValue() : false;
+
+      bool mon = panelInputs->cbMon[colMap]
+                     ? panelInputs->cbMon[colMap]->GetValue()
+                     : false;
       hid->setInputMon(i, mon);
-      
+
       if (panelInputs->cbInst[colMap]) {
         hid->setInputInst(i, panelInputs->cbInst[colMap]->GetValue());
       }
@@ -2542,40 +2886,55 @@ protected:
       bool mute = false;
       bool solo = false;
       bool phase = false;
-      
+
       if (i < 2) {
-        if (panelInputs->cbMute[colMap]) mute = panelInputs->cbMute[colMap]->GetValue();
-        if (panelInputs->cbSolo[colMap]) solo = panelInputs->cbSolo[colMap]->GetValue();
-        if (panelInputs->cbPhase[colMap]) phase = panelInputs->cbPhase[colMap]->GetValue();
+        if (panelInputs->cbMute[colMap])
+          mute = panelInputs->cbMute[colMap]->GetValue();
+        if (panelInputs->cbSolo[colMap])
+          solo = panelInputs->cbSolo[colMap]->GetValue();
+        if (panelInputs->cbPhase[colMap])
+          phase = panelInputs->cbPhase[colMap]->GetValue();
       } else {
         if (linked) {
-          if (panelInputs->cbMute[2]) mute = panelInputs->cbMute[2]->GetValue();
-          if (panelInputs->cbSolo[2]) solo = panelInputs->cbSolo[2]->GetValue();
-          if (panelInputs->cbPhase[2]) phase = panelInputs->cbPhase[2]->GetValue();
+          if (panelInputs->cbMute[2])
+            mute = panelInputs->cbMute[2]->GetValue();
+          if (panelInputs->cbSolo[2])
+            solo = panelInputs->cbSolo[2]->GetValue();
+          if (panelInputs->cbPhase[2])
+            phase = panelInputs->cbPhase[2]->GetValue();
         } else {
           if (i == 2) {
-            if (panelInputs->cbMuteL) mute = panelInputs->cbMuteL->GetValue();
-            if (panelInputs->cbSoloL) solo = panelInputs->cbSoloL->GetValue();
-            if (panelInputs->cbPhaseL) phase = panelInputs->cbPhaseL->GetValue();
+            if (panelInputs->cbMuteL)
+              mute = panelInputs->cbMuteL->GetValue();
+            if (panelInputs->cbSoloL)
+              solo = panelInputs->cbSoloL->GetValue();
+            if (panelInputs->cbPhaseL)
+              phase = panelInputs->cbPhaseL->GetValue();
           } else {
-            if (panelInputs->cbMuteR) mute = panelInputs->cbMuteR->GetValue();
-            if (panelInputs->cbSoloR) solo = panelInputs->cbSoloR->GetValue();
-            if (panelInputs->cbPhaseR) phase = panelInputs->cbPhaseR->GetValue();
+            if (panelInputs->cbMuteR)
+              mute = panelInputs->cbMuteR->GetValue();
+            if (panelInputs->cbSoloR)
+              solo = panelInputs->cbSoloR->GetValue();
+            if (panelInputs->cbPhaseR)
+              phase = panelInputs->cbPhaseR->GetValue();
           }
         }
       }
 
       int32_t loopGainDB = gainDB;
       if (i >= 2 && !linked) {
-        if (panelInputs->slGainI[i]) loopGainDB = panelInputs->slGainI[i]->GetValue();
+        if (panelInputs->slGainI[i])
+          loopGainDB = panelInputs->slGainI[i]->GetValue();
       }
 
-      int32_t gainVal = gain->getMonoGain(loopGainDB, mute, solo, anySolo, phase);
+      int32_t gainVal =
+          gain->getMonoGain(loopGainDB, mute, solo, anySolo, phase);
       hid->setInputGainiI32(i, gainVal, hw);
 
       hid->settings[0x2101 + (i << 8)] = mon ? 1 : 0;
       if (panelInputs->cbInst[colMap]) {
-        hid->settings[0x2103 + (i << 8)] = panelInputs->cbInst[colMap]->GetValue() ? 1 : 0;
+        hid->settings[0x2103 + (i << 8)] =
+            panelInputs->cbInst[colMap]->GetValue() ? 1 : 0;
       }
       hid->settings[0x2105 + (i << 8)] = gainVal;
 
@@ -2595,7 +2954,7 @@ protected:
   void OnLoad(wxCommandEvent &event);
   void OnSave(wxCommandEvent &event);
   void OnDeviceSave(wxCommandEvent &event);
-  
+
   void OnSettings(wxCommandEvent &event) {
     SettingsDialog dlg(this, hid->pid, hid);
     dlg.ShowModal();
@@ -2622,7 +2981,9 @@ protected:
 // TPMixer constructor
 // ----------------------------------------------------------------------------
 
-TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "TOPPING Professional Control Center", wxDefaultPosition, wxDefaultSize) {
+TPMixer::TPMixer()
+    : wxFrame(nullptr, wxID_ANY, "TOPPING Professional Control Center",
+              wxDefaultPosition, wxDefaultSize) {
   SetBackgroundColour(wxColour(17, 17, 17));
   Bind(wxEVT_PAINT, [this](wxPaintEvent &evt) {
     wxPaintDC dc(this);
@@ -2630,7 +2991,7 @@ TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "TOPPING Professional Control Ce
     dc.Clear();
   });
   Bind(wxEVT_SIZE, &TPMixer::OnSize, this);
-  
+
   std::string home = getenv("HOME");
   dir1 = home + pathSep + dirConfig;
   dir2 = dir1 + pathSep + dirApp;
@@ -2641,16 +3002,20 @@ TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "TOPPING Professional Control Ce
 
   if (NULL != hid->getHandle()) {
     std::string deviceName = "Topping E4X4";
-    if (hid->pid == 0x8755) deviceName = "Topping E1X2 OTG";
-    else if (hid->pid == 0x8752) deviceName = "Topping E2X2";
-    else if (hid->pid == 0x8756) deviceName = "Topping E2X2 OTG";
+    if (hid->pid == 0x8755)
+      deviceName = "Topping E1X2 OTG";
+    else if (hid->pid == 0x8752)
+      deviceName = "Topping E2X2";
+    else if (hid->pid == 0x8756)
+      deviceName = "Topping E2X2 OTG";
     SetTitle(deviceName + " Control Center");
   }
 
   wxBoxSizer *mainSizer = new wxBoxSizer(wxVERTICAL);
 
   // 1. TOP HEADER PANEL
-  wxPanel *headerPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, 32));
+  wxPanel *headerPanel =
+      new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, 32), 0, "headerPanel");
   headerPanel->SetBackgroundColour(wxColour(44, 44, 44));
   headerPanel->Bind(wxEVT_PAINT, [headerPanel](wxPaintEvent &evt) {
     wxPaintDC dc(headerPanel);
@@ -2659,30 +3024,29 @@ TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "TOPPING Professional Control Ce
   });
   wxBoxSizer *headerSizer = new wxBoxSizer(wxHORIZONTAL);
 
-  wxStaticText *logoText = new wxStaticText(headerPanel, wxID_ANY, "TOPPING ");
-  logoText->SetForegroundColour(*wxWHITE);
-  logoText->SetFont(logoText->GetFont().Bold().Larger());
-  headerSizer->Add(logoText, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 10);
-
-  wxStaticText *profText = new wxStaticText(headerPanel, wxID_ANY, "Professional");
-  profText->SetForegroundColour(wxColour(160, 160, 160));
-  headerSizer->Add(profText, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-
-  CustomButton *btnSettings = new CustomButton(headerPanel, ID_SETTINGS, "", false, wxSize(20, 20), wxColour(29, 115, 201), ICON_GEAR);
-  headerSizer->Add(btnSettings, 0, wxALIGN_CENTER_VERTICAL);
+  CustomButton *btnSettings =
+      new CustomButton(headerPanel, ID_SETTINGS, "", false, wxSize(20, 20),
+                       wxColour(29, 115, 201), ICON_GEAR);
+  headerSizer->Add(btnSettings, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 10);
 
   headerSizer->Add(0, 0, 1, wxEXPAND);
 
-  wxStaticText *lblWork = new wxStaticText(headerPanel, wxID_ANY, "Workspace | ");
+  wxStaticText *lblWork =
+      new wxStaticText(headerPanel, wxID_ANY, "Workspace | ");
   lblWork->SetForegroundColour(wxColour(140, 140, 140));
   headerSizer->Add(lblWork, 0, wxALIGN_CENTER_VERTICAL);
-  
-  wxStaticText *valWork = new wxStaticText(headerPanel, wxID_ANY, "New20260716  ");
+
+  wxStaticText *valWork =
+      new wxStaticText(headerPanel, wxID_ANY, "New20260716  ");
   valWork->SetForegroundColour(*wxWHITE);
   headerSizer->Add(valWork, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
 
-  CustomButton *btnSave = new CustomButton(headerPanel, ID_SAVE, "", false, wxSize(20, 20), wxColour(29, 115, 201), ICON_SAVE);
-  CustomButton *btnLoad = new CustomButton(headerPanel, ID_LOAD, "", false, wxSize(20, 20), wxColour(29, 115, 201), ICON_DOWNLOAD);
+  CustomButton *btnSave =
+      new CustomButton(headerPanel, ID_SAVE, "", false, wxSize(20, 20),
+                       wxColour(29, 115, 201), ICON_SAVE);
+  CustomButton *btnLoad =
+      new CustomButton(headerPanel, ID_LOAD, "", false, wxSize(20, 20),
+                       wxColour(29, 115, 201), ICON_DOWNLOAD);
   headerSizer->Add(btnSave, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
   headerSizer->Add(btnLoad, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
 
@@ -2705,11 +3069,11 @@ TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "TOPPING Professional Control Ce
   wxBoxSizer *col1 = new wxBoxSizer(wxVERTICAL);
   col1->Add(panelInputs, 1, wxEXPAND | wxBOTTOM, 2);
   col1->Add(panelLoopbacks, 1, wxEXPAND);
-  
+
   wxBoxSizer *col2 = new wxBoxSizer(wxVERTICAL);
   col2->Add(panelMixers, 1, wxEXPAND | wxBOTTOM, 2);
   col2->Add(panelOutputs, 1, wxEXPAND);
-  
+
   wxBoxSizer *contentSizer = new wxBoxSizer(wxHORIZONTAL);
   contentSizer->Add(col1, 0, wxEXPAND | wxRIGHT, 2);
   contentSizer->Add(col2, 0, wxEXPAND);
@@ -2719,59 +3083,108 @@ TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "TOPPING Professional Control Ce
   SetSizer(mainSizer);
 
   // leftWidth is already computed above
-  int rightWidth = 680;
+  int rightWidth = 760;
   int totalWidth = leftWidth + rightWidth + 24;
   int totalHeight = 580;
 
   SetMinSize(wxSize(totalWidth, totalHeight));
   SetSize(wxSize(totalWidth, totalHeight));
 
-  btnSettings->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnSettings, this); 
+  // Apply initial scale once the window is shown and layout is stable
+  CallAfter(&TPMixer::RescaleUI, g_uiScale);
+
+  btnSettings->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnSettings, this);
   btnSave->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnSave, this);
   btnLoad->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLoad, this);
 
-  int numCols = (hid->pid == 0x8754) ? 3 : ((hid->pid == 0x8752 || hid->pid == 0x8756) ? 2 : 1);
+  int numCols = (hid->pid == 0x8754)
+                    ? 3
+                    : ((hid->pid == 0x8752 || hid->pid == 0x8756) ? 2 : 1);
   for (int col = 0; col < numCols; ++col) {
     if (col < 2) {
-      if (panelInputs->cbMon[col]) panelInputs->cbMon[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->cb48V[col]) panelInputs->cb48V[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->cbInst[col]) panelInputs->cbInst[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->slGainI[col]) panelInputs->slGainI[col]->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain, this);
-      if (panelInputs->cbSolo[col]) panelInputs->cbSolo[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->cbMute[col]) panelInputs->cbMute[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->cbPhase[col]) panelInputs->cbPhase[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbMon[col])
+        panelInputs->cbMon[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain,
+                                      this);
+      if (panelInputs->cb48V[col])
+        panelInputs->cb48V[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain,
+                                      this);
+      if (panelInputs->cbInst[col])
+        panelInputs->cbInst[col]->Bind(wxEVT_TOGGLEBUTTON,
+                                       &TPMixer::OnInputGain, this);
+      if (panelInputs->slGainI[col])
+        panelInputs->slGainI[col]->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain,
+                                        this);
+      if (panelInputs->cbSolo[col])
+        panelInputs->cbSolo[col]->Bind(wxEVT_TOGGLEBUTTON,
+                                       &TPMixer::OnInputGain, this);
+      if (panelInputs->cbMute[col])
+        panelInputs->cbMute[col]->Bind(wxEVT_TOGGLEBUTTON,
+                                       &TPMixer::OnInputGain, this);
+      if (panelInputs->cbPhase[col])
+        panelInputs->cbPhase[col]->Bind(wxEVT_TOGGLEBUTTON,
+                                        &TPMixer::OnInputGain, this);
     } else {
-      if (panelInputs->slGainI[2]) panelInputs->slGainI[2]->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain, this);
-      if (panelInputs->slGainI[3]) panelInputs->slGainI[3]->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain, this);
-      if (panelInputs->slGainICombined) panelInputs->slGainICombined->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain, this);
-      if (panelInputs->btnLink) panelInputs->btnLink->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLinkToggle, this);
-      
+      if (panelInputs->slGainI[2])
+        panelInputs->slGainI[2]->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain,
+                                      this);
+      if (panelInputs->slGainI[3])
+        panelInputs->slGainI[3]->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain,
+                                      this);
+      if (panelInputs->slGainICombined)
+        panelInputs->slGainICombined->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain,
+                                           this);
+      if (panelInputs->btnLink)
+        panelInputs->btnLink->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLinkToggle,
+                                   this);
+
       // Bind Input split controls
-      if (panelInputs->cbSoloL) panelInputs->cbSoloL->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->cbSoloR) panelInputs->cbSoloR->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->cbMuteL) panelInputs->cbMuteL->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->cbMuteR) panelInputs->cbMuteR->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->cbPhaseL) panelInputs->cbPhaseL->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->cbPhaseR) panelInputs->cbPhaseR->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbSoloL)
+        panelInputs->cbSoloL->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain,
+                                   this);
+      if (panelInputs->cbSoloR)
+        panelInputs->cbSoloR->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain,
+                                   this);
+      if (panelInputs->cbMuteL)
+        panelInputs->cbMuteL->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain,
+                                   this);
+      if (panelInputs->cbMuteR)
+        panelInputs->cbMuteR->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain,
+                                   this);
+      if (panelInputs->cbPhaseL)
+        panelInputs->cbPhaseL->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain,
+                                    this);
+      if (panelInputs->cbPhaseR)
+        panelInputs->cbPhaseR->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain,
+                                    this);
 
       // Combined
-      if (panelInputs->cbSolo[2]) panelInputs->cbSolo[2]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->cbMute[2]) panelInputs->cbMute[2]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
-      if (panelInputs->cbPhase[2]) panelInputs->cbPhase[2]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbSolo[2])
+        panelInputs->cbSolo[2]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain,
+                                     this);
+      if (panelInputs->cbMute[2])
+        panelInputs->cbMute[2]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain,
+                                     this);
+      if (panelInputs->cbPhase[2])
+        panelInputs->cbPhase[2]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain,
+                                      this);
     }
-    if (panelInputs->lbPeaksI[col]) panelInputs->lbPeaksI[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputPeak, this);
+    if (panelInputs->lbPeaksI[col])
+      panelInputs->lbPeaksI[col]->Bind(wxEVT_TOGGLEBUTTON,
+                                       &TPMixer::OnInputPeak, this);
   }
 
   for (int i = 0; i < panelMixers->N_MIXERS; ++i) {
     if (panelMixers->tabButtons[i]) {
-      panelMixers->tabButtons[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) {
-        for (int t = 0; t < panelMixers->N_MIXERS; ++t) {
-          if (panelMixers->tabButtons[t]) panelMixers->tabButtons[t]->SetValue(t == i);
-        }
-        wxCommandEvent fakeEvt(wxEVT_RADIOBOX, ID_MIX_BUS_SEL);
-        fakeEvt.SetInt(i);
-        this->OnMixBusSel(fakeEvt);
-      });
+      panelMixers->tabButtons[i]->Bind(
+          wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) {
+            for (int t = 0; t < panelMixers->N_MIXERS; ++t) {
+              if (panelMixers->tabButtons[t])
+                panelMixers->tabButtons[t]->SetValue(t == i);
+            }
+            wxCommandEvent fakeEvt(wxEVT_RADIOBOX, ID_MIX_BUS_SEL);
+            fakeEvt.SetInt(i);
+            this->OnMixBusSel(fakeEvt);
+          });
     }
   }
 
@@ -2779,121 +3192,180 @@ TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "TOPPING Professional Control Ce
   for (int i = 0; i < panelMixers->N_MIX_SRCS / 2; ++i) {
     int l = i * 2;
     int r = l + 1;
-    
+
     if (panelMixers->slPan[l]) {
-      panelMixers->slPan[l]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->slPan[l]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) {
+        this->OnMixVolumeChanged(i);
+      });
     }
     if (panelMixers->slPan[r]) {
-      panelMixers->slPan[r]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->slPan[r]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) {
+        this->OnMixVolumeChanged(i);
+      });
     }
 
     if (panelMixers->slVol[i]) {
-      panelMixers->slVol[i]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->slVol[i]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) {
+        this->OnMixVolumeChanged(i);
+      });
     }
     if (panelMixers->slVolL[i]) {
-      panelMixers->slVolL[i]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->slVolL[i]->Bind(
+          wxEVT_SLIDER,
+          [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
     if (panelMixers->slVolR[i]) {
-      panelMixers->slVolR[i]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->slVolR[i]->Bind(
+          wxEVT_SLIDER,
+          [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
 
     if (panelMixers->btnLink[i]) {
-      panelMixers->btnLink[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLinkToggle, this);
+      panelMixers->btnLink[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLinkToggle,
+                                    this);
     }
 
     if (panelMixers->ckSolo[i]) {
-      panelMixers->ckSolo[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->ckSolo[i]->Bind(
+          wxEVT_TOGGLEBUTTON,
+          [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
     if (panelMixers->ckMute[i]) {
-      panelMixers->ckMute[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->ckMute[i]->Bind(
+          wxEVT_TOGGLEBUTTON,
+          [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
     if (panelMixers->ckPhaseCombined[i]) {
-      panelMixers->ckPhaseCombined[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->ckPhaseCombined[i]->Bind(
+          wxEVT_TOGGLEBUTTON,
+          [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
 
     if (panelMixers->ckSoloL[i]) {
-      panelMixers->ckSoloL[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->ckSoloL[i]->Bind(
+          wxEVT_TOGGLEBUTTON,
+          [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
     if (panelMixers->ckSoloR[i]) {
-      panelMixers->ckSoloR[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->ckSoloR[i]->Bind(
+          wxEVT_TOGGLEBUTTON,
+          [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
     if (panelMixers->ckMuteL[i]) {
-      panelMixers->ckMuteL[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->ckMuteL[i]->Bind(
+          wxEVT_TOGGLEBUTTON,
+          [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
     if (panelMixers->ckMuteR[i]) {
-      panelMixers->ckMuteR[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->ckMuteR[i]->Bind(
+          wxEVT_TOGGLEBUTTON,
+          [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
 
     if (panelMixers->ckPhase[l]) {
-      panelMixers->ckPhase[l]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->ckPhase[l]->Bind(
+          wxEVT_TOGGLEBUTTON,
+          [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
     if (panelMixers->ckPhase[r]) {
-      panelMixers->ckPhase[r]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+      panelMixers->ckPhase[r]->Bind(
+          wxEVT_TOGGLEBUTTON,
+          [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
   }
 
   for (int i = 0; i < panelLoopbacks->N_LOOPBACKS; ++i) {
-    if (panelLoopbacks->cbSelect[i]) panelLoopbacks->cbSelect[i]->Bind(wxEVT_COMBOBOX, &TPMixer::OnLoopToggle, this);
-    if (panelLoopbacks->slOutput[i]) panelLoopbacks->slOutput[i]->Bind(wxEVT_SLIDER, &TPMixer::OnLoopVolume, this);
-    if (panelLoopbacks->slOutputL[i]) panelLoopbacks->slOutputL[i]->Bind(wxEVT_SLIDER, &TPMixer::OnLoopVolume, this);
-    if (panelLoopbacks->slOutputR[i]) panelLoopbacks->slOutputR[i]->Bind(wxEVT_SLIDER, &TPMixer::OnLoopVolume, this);
-    if (panelLoopbacks->btnLink[i]) panelLoopbacks->btnLink[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLinkToggle, this);
-    if (panelLoopbacks->ckMute[i]) panelLoopbacks->ckMute[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLoopToggle, this);
-    if (panelLoopbacks->ckMuteL[i]) panelLoopbacks->ckMuteL[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLoopToggle, this);
-    if (panelLoopbacks->ckMuteR[i]) panelLoopbacks->ckMuteR[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLoopToggle, this);
+    if (panelLoopbacks->cbSelect[i])
+      panelLoopbacks->cbSelect[i]->Bind(wxEVT_COMBOBOX, &TPMixer::OnLoopToggle,
+                                        this);
+    if (panelLoopbacks->slOutput[i])
+      panelLoopbacks->slOutput[i]->Bind(wxEVT_SLIDER, &TPMixer::OnLoopVolume,
+                                        this);
+    if (panelLoopbacks->slOutputL[i])
+      panelLoopbacks->slOutputL[i]->Bind(wxEVT_SLIDER, &TPMixer::OnLoopVolume,
+                                         this);
+    if (panelLoopbacks->slOutputR[i])
+      panelLoopbacks->slOutputR[i]->Bind(wxEVT_SLIDER, &TPMixer::OnLoopVolume,
+                                         this);
+    if (panelLoopbacks->btnLink[i])
+      panelLoopbacks->btnLink[i]->Bind(wxEVT_TOGGLEBUTTON,
+                                       &TPMixer::OnLinkToggle, this);
+    if (panelLoopbacks->ckMute[i])
+      panelLoopbacks->ckMute[i]->Bind(wxEVT_TOGGLEBUTTON,
+                                      &TPMixer::OnLoopToggle, this);
+    if (panelLoopbacks->ckMuteL[i])
+      panelLoopbacks->ckMuteL[i]->Bind(wxEVT_TOGGLEBUTTON,
+                                       &TPMixer::OnLoopToggle, this);
+    if (panelLoopbacks->ckMuteR[i])
+      panelLoopbacks->ckMuteR[i]->Bind(wxEVT_TOGGLEBUTTON,
+                                       &TPMixer::OnLoopToggle, this);
   }
 
-  int numOuts = (hid->pid == 0x8752) ? 1 : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
+  int numOuts = (hid->pid == 0x8752)
+                    ? 1
+                    : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
   for (int i = 0; i < numOuts; ++i) {
-    if (panelOutputs->cbSelect[i]) panelOutputs->cbSelect[i]->Bind(wxEVT_COMBOBOX, &TPMixer::OnOutputToggle, this);
-    if (panelOutputs->slOutput[i]) panelOutputs->slOutput[i]->Bind(wxEVT_SLIDER, &TPMixer::OnOutputVolume, this);
-    if (panelOutputs->slOutputL[i]) panelOutputs->slOutputL[i]->Bind(wxEVT_SLIDER, &TPMixer::OnOutputVolume, this);
-    if (panelOutputs->slOutputR[i]) panelOutputs->slOutputR[i]->Bind(wxEVT_SLIDER, &TPMixer::OnOutputVolume, this);
-    if (panelOutputs->btnLink[i]) panelOutputs->btnLink[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLinkToggle, this);
+    if (panelOutputs->cbSelect[i])
+      panelOutputs->cbSelect[i]->Bind(wxEVT_COMBOBOX, &TPMixer::OnOutputToggle,
+                                      this);
+    if (panelOutputs->slOutput[i])
+      panelOutputs->slOutput[i]->Bind(wxEVT_SLIDER, &TPMixer::OnOutputVolume,
+                                      this);
+    if (panelOutputs->slOutputL[i])
+      panelOutputs->slOutputL[i]->Bind(wxEVT_SLIDER, &TPMixer::OnOutputVolume,
+                                       this);
+    if (panelOutputs->slOutputR[i])
+      panelOutputs->slOutputR[i]->Bind(wxEVT_SLIDER, &TPMixer::OnOutputVolume,
+                                       this);
+    if (panelOutputs->btnLink[i])
+      panelOutputs->btnLink[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLinkToggle,
+                                     this);
     if (i == 0) {
-      if (panelOutputs->btnPhoneIcon[0]) panelOutputs->btnPhoneIcon[0]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
-      if (panelOutputs->btnTRS[0]) panelOutputs->btnTRS[0]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
-      if (panelOutputs->btnAUX[0]) panelOutputs->btnAUX[0]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
+      if (panelOutputs->btnPhoneIcon[0])
+        panelOutputs->btnPhoneIcon[0]->Bind(wxEVT_TOGGLEBUTTON,
+                                            &TPMixer::OnOutputToggle, this);
+      if (panelOutputs->btnTRS[0])
+        panelOutputs->btnTRS[0]->Bind(wxEVT_TOGGLEBUTTON,
+                                      &TPMixer::OnOutputToggle, this);
+      if (panelOutputs->btnAUX[0])
+        panelOutputs->btnAUX[0]->Bind(wxEVT_TOGGLEBUTTON,
+                                      &TPMixer::OnOutputToggle, this);
     } else {
-      if (panelOutputs->ckMute[i]) panelOutputs->ckMute[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
-      if (panelOutputs->ckMuteL[i]) panelOutputs->ckMuteL[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
-      if (panelOutputs->ckMuteR[i]) panelOutputs->ckMuteR[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
+      if (panelOutputs->ckMute[i])
+        panelOutputs->ckMute[i]->Bind(wxEVT_TOGGLEBUTTON,
+                                      &TPMixer::OnOutputToggle, this);
+      if (panelOutputs->ckMuteL[i])
+        panelOutputs->ckMuteL[i]->Bind(wxEVT_TOGGLEBUTTON,
+                                       &TPMixer::OnOutputToggle, this);
+      if (panelOutputs->ckMuteR[i])
+        panelOutputs->ckMuteR[i]->Bind(wxEVT_TOGGLEBUTTON,
+                                       &TPMixer::OnOutputToggle, this);
     }
   }
 
-  if (panelOutputs->mixKnob) panelOutputs->mixKnob->Bind(wxEVT_SLIDER, &TPMixer::OnPhoneMix, this);
-  if (panelOutputs->btnPhoneGain) panelOutputs->btnPhoneGain->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnPhoneGain, this);
+  if (panelOutputs->mixKnob)
+    panelOutputs->mixKnob->Bind(wxEVT_SLIDER, &TPMixer::OnPhoneMix, this);
+  if (panelOutputs->btnPhoneGain)
+    panelOutputs->btnPhoneGain->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnPhoneGain,
+                                     this);
 
   Bind(wxEVT_CLOSE_WINDOW, &TPMixer::OnClose, this);
 
-  // PID-specific label customizations and control hiding
   if (hid->pid == 0x8755 || hid->pid == 0x8756) {
-    if (panelMixers->lbTitle[0]) panelMixers->lbTitle[0]->SetLabel("IN 1");
-    if (panelMixers->lbTitle[1]) panelMixers->lbTitle[1]->SetLabel("Mobile In");
-    for (int i = 0; i < panelMixers->N_MIX_SRCS; ++i) {
-      if (panelMixers->ckPhase[i]) panelMixers->ckPhase[i]->Hide();
-    }
-    for (int i = 0; i < panelMixers->N_MIX_SRCS / 2; ++i) {
-      if (panelMixers->ckPhaseCombined[i]) panelMixers->ckPhaseCombined[i]->Hide();
-    }
+    if (panelMixers->lbTitle[0])
+      panelMixers->lbTitle[0]->SetLabel("IN 1");
+    if (panelMixers->lbTitle[1])
+      panelMixers->lbTitle[1]->SetLabel("Mobile In");
   } else if (hid->pid == 0x8752) {
-    if (panelMixers->lbTitle[1]) panelMixers->lbTitle[1]->SetLabel("Unused");
-    for (int i = 0; i < panelMixers->N_MIX_SRCS; ++i) {
-      if (panelMixers->ckPhase[i]) panelMixers->ckPhase[i]->Hide();
-    }
-    for (int i = 0; i < panelMixers->N_MIX_SRCS / 2; ++i) {
-      if (panelMixers->ckPhaseCombined[i]) panelMixers->ckPhaseCombined[i]->Hide();
-    }
+    if (panelMixers->lbTitle[1])
+      panelMixers->lbTitle[1]->SetLabel("Unused");
   }
 
   loadSettings();
   startHidReader();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
   if (NULL != hid->getHandle()) {
-    if (hid->pid == 0x8754) {
-      hid->requestDeviceDump();
-    } else {
-      CallAfter(&TPMixer::pushGuiStateToDevice);
-    }
+    hid->requestDeviceDump();
   }
 }
 
@@ -2907,15 +3379,17 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
   int32_t level01DB = val;
   int32_t cls = ch & 0xf0;
 
+
+
   switch (cls) {
   case 0x10:
     break;
-  case 0x20: 
-  {
+  case 0x20: {
     int32_t logicCh = ch - 0x21;
     int32_t vGauge = level01DB - panelInputs->LEVEL_MIN;
     int colMap = (logicCh >= 2) ? 2 : logicCh;
-    bool inputLinked = (panelInputs->btnLink) ? panelInputs->btnLink->GetValue() : true;
+    bool inputLinked =
+        (panelInputs->btnLink) ? panelInputs->btnLink->GetValue() : true;
 
     switch (subCh) {
     case 0x01:
@@ -2936,10 +3410,12 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
       }
       hid->settings[0x2103 + (logicCh << 8)] = val;
       break;
-    case 0x04: 
-      if (vGauge < 0) vGauge = 0;
-      else if (vGauge > panelInputs->LEVEL_RANGE) vGauge = panelInputs->LEVEL_RANGE;
-      
+    case 0x04:
+      if (vGauge < 0)
+        vGauge = 0;
+      else if (vGauge > panelInputs->LEVEL_RANGE)
+        vGauge = panelInputs->LEVEL_RANGE;
+
       panelInputs->inLevelVal[logicCh] = level01DB;
       if (logicCh < 2) {
         if (panelInputs->slGainI[logicCh]) {
@@ -2948,92 +3424,123 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
         if (level01DB > panelInputs->PeaksI[logicCh]) {
           panelInputs->PeaksI[logicCh] = level01DB;
           if (panelInputs->lbPeaksI[logicCh]) {
-            panelInputs->lbPeaksI[logicCh]->SetLabel(std::format("{:+.1f}", level01DB * 0.1));
+            panelInputs->lbPeaksI[logicCh]->SetLabel(
+                std::format("{:+.1f}", level01DB * 0.1));
           }
         }
       } else {
         if (inputLinked) {
           if (panelInputs->slGainICombined) {
-            panelInputs->slGainICombined->SetMeterLevels(panelInputs->inLevelVal[2], panelInputs->inLevelVal[3]);
+            panelInputs->slGainICombined->SetMeterLevels(
+                panelInputs->inLevelVal[2], panelInputs->inLevelVal[3]);
           }
         } else {
           if (panelInputs->slGainI[2]) {
-            panelInputs->slGainI[2]->SetMeterLevels(panelInputs->inLevelVal[2], -960);
+            panelInputs->slGainI[2]->SetMeterLevels(panelInputs->inLevelVal[2],
+                                                    -960);
           }
           if (panelInputs->slGainI[3]) {
-            panelInputs->slGainI[3]->SetMeterLevels(panelInputs->inLevelVal[3], -960);
+            panelInputs->slGainI[3]->SetMeterLevels(panelInputs->inLevelVal[3],
+                                                    -960);
           }
         }
         if (level01DB > panelInputs->PeaksI[2]) {
           panelInputs->PeaksI[2] = level01DB;
           if (panelInputs->lbPeaksI[2]) {
-            panelInputs->lbPeaksI[2]->SetLabel(std::format("{:+.1f}", level01DB * 0.1));
+            panelInputs->lbPeaksI[2]->SetLabel(
+                std::format("{:+.1f}", level01DB * 0.1));
           }
         }
       }
-      
+
       panelMixers->mixLevelVal[logicCh] = level01DB;
       if (logicCh < 2) {
-        bool mixLinked0 = panelMixers->btnLink[0] ? panelMixers->btnLink[0]->GetValue() : true;
+        bool mixLinked0 = panelMixers->btnLink[0]
+                              ? panelMixers->btnLink[0]->GetValue()
+                              : true;
         if (mixLinked0) {
           if (panelMixers->slVol[0]) {
-            panelMixers->slVol[0]->SetMeterLevels(panelMixers->mixLevelVal[0], panelMixers->mixLevelVal[1]);
+            panelMixers->slVol[0]->SetMeterLevels(panelMixers->mixLevelVal[0],
+                                                  panelMixers->mixLevelVal[1]);
           }
         } else {
-          if (panelMixers->slVolL[0]) panelMixers->slVolL[0]->SetMeterLevels(panelMixers->mixLevelVal[0], -960);
-          if (panelMixers->slVolR[0]) panelMixers->slVolR[0]->SetMeterLevels(panelMixers->mixLevelVal[1], -960);
+          if (panelMixers->slVolL[0])
+            panelMixers->slVolL[0]->SetMeterLevels(panelMixers->mixLevelVal[0],
+                                                   -960);
+          if (panelMixers->slVolR[0])
+            panelMixers->slVolR[0]->SetMeterLevels(panelMixers->mixLevelVal[1],
+                                                   -960);
         }
       } else {
-        bool mixLinked1 = panelMixers->btnLink[1] ? panelMixers->btnLink[1]->GetValue() : true;
+        bool mixLinked1 = panelMixers->btnLink[1]
+                              ? panelMixers->btnLink[1]->GetValue()
+                              : true;
         if (mixLinked1) {
           if (panelMixers->slVol[1]) {
-            panelMixers->slVol[1]->SetMeterLevels(panelMixers->mixLevelVal[2], panelMixers->mixLevelVal[3]);
+            panelMixers->slVol[1]->SetMeterLevels(panelMixers->mixLevelVal[2],
+                                                  panelMixers->mixLevelVal[3]);
           }
         } else {
-          if (panelMixers->slVolL[1]) panelMixers->slVolL[1]->SetMeterLevels(panelMixers->mixLevelVal[2], -960);
-          if (panelMixers->slVolR[1]) panelMixers->slVolR[1]->SetMeterLevels(panelMixers->mixLevelVal[3], -960);
+          if (panelMixers->slVolL[1])
+            panelMixers->slVolL[1]->SetMeterLevels(panelMixers->mixLevelVal[2],
+                                                   -960);
+          if (panelMixers->slVolR[1])
+            panelMixers->slVolR[1]->SetMeterLevels(panelMixers->mixLevelVal[3],
+                                                   -960);
         }
       }
       break;
-    case 0x05: 
+    case 0x05:
       if (hid->pid == 0x8754) {
         auto [muted, phase, gainDB] = gain2dB(val);
         if (colMap < 2) {
-          if (panelInputs->slGainI[colMap]) panelInputs->slGainI[colMap]->SetValue(gainDB);
+          if (panelInputs->slGainI[colMap])
+            panelInputs->slGainI[colMap]->SetValue(gainDB);
         } else {
           if (inputLinked) {
-            if (panelInputs->slGainICombined) panelInputs->slGainICombined->SetValue(gainDB);
+            if (panelInputs->slGainICombined)
+              panelInputs->slGainICombined->SetValue(gainDB);
           } else {
-            if (panelInputs->slGainI[logicCh]) panelInputs->slGainI[logicCh]->SetValue(gainDB);
+            if (panelInputs->slGainI[logicCh])
+              panelInputs->slGainI[logicCh]->SetValue(gainDB);
           }
         }
-        if (panelInputs->cbMute[colMap]) panelInputs->cbMute[colMap]->SetValue(muted);
-        if (panelInputs->cbPhase[colMap]) panelInputs->cbPhase[colMap]->SetValue(phase);
+        if (panelInputs->cbMute[colMap])
+          panelInputs->cbMute[colMap]->SetValue(muted);
+        if (panelInputs->cbPhase[colMap])
+          panelInputs->cbPhase[colMap]->SetValue(phase);
         if (panelInputs->lbGainVal[colMap]) {
-          panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} dB", gainDB));
+          panelInputs->lbGainVal[colMap]->SetLabel(
+              std::format("{:+} dB", gainDB));
         }
       }
       break;
     case 0x06:
-      if (panelInputs->cbMute[colMap]) panelInputs->cbMute[colMap]->SetValue(val ? true : false);
+      if (panelInputs->cbMute[colMap])
+        panelInputs->cbMute[colMap]->SetValue(val ? true : false);
       hid->settings[0x2106 + (logicCh << 8)] = val;
       break;
     case 0x07:
-      if (panelInputs->cbSolo[colMap]) panelInputs->cbSolo[colMap]->SetValue(val ? true : false);
+      if (panelInputs->cbSolo[colMap])
+        panelInputs->cbSolo[colMap]->SetValue(val ? true : false);
       hid->settings[0x2107 + (logicCh << 8)] = val;
       break;
     case 0x08:
-      if (panelInputs->cbPhase[colMap]) panelInputs->cbPhase[colMap]->SetValue(val ? true : false);
+      if (panelInputs->cbPhase[colMap])
+        panelInputs->cbPhase[colMap]->SetValue(val ? true : false);
       hid->settings[0x2108 + (logicCh << 8)] = val;
       break;
     case 0x09:
       if (colMap < 2) {
-        if (panelInputs->slGainI[colMap]) panelInputs->slGainI[colMap]->SetValue(val);
+        if (panelInputs->slGainI[colMap])
+          panelInputs->slGainI[colMap]->SetValue(val);
       } else {
         if (inputLinked) {
-          if (panelInputs->slGainICombined) panelInputs->slGainICombined->SetValue(val);
+          if (panelInputs->slGainICombined)
+            panelInputs->slGainICombined->SetValue(val);
         } else {
-          if (panelInputs->slGainI[logicCh]) panelInputs->slGainI[logicCh]->SetValue(val);
+          if (panelInputs->slGainI[logicCh])
+            panelInputs->slGainI[logicCh]->SetValue(val);
         }
       }
       if (panelInputs->lbGainVal[colMap]) {
@@ -3043,122 +3550,160 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
       break;
     }
   } break;
-  case 0x30: 
-  {
+  case 0x30: {
     int32_t vGauge = level01DB - panelOutputs->LEVEL_MIN;
     int32_t logicCh = ch - 0x31;
-    if (logicCh < 0 || logicCh >= 10) return;
-    
-    switch (logicCh) {
-    case 0x04:
-    case 0x05:
-      {
-        int phoneIdx = logicCh - 4;
-        if (subCh == 1) {
-          if (val >= 1 && val <= 14) {
-            if (panelOutputs->cbSelect[phoneIdx]) {
-              panelOutputs->cbSelect[phoneIdx]->SetSelection(val - 1);
-            }
-            hid->settings[0x3501 + (phoneIdx << 8)] = val;
+    if (logicCh < 0 || logicCh >= 10)
+      return;
+
+    int phoneIdx = -1;
+    if (logicCh == 4 || logicCh == 8) {
+      phoneIdx = 0;
+    } else if (logicCh == 5 || logicCh == 9) {
+      phoneIdx = 1;
+    }
+
+    if (phoneIdx != -1) {
+      if (subCh == 1) {
+        if (val >= 1 && val <= 14) {
+          if (panelOutputs->cbSelect[phoneIdx]) {
+            panelOutputs->cbSelect[phoneIdx]->SetSelection(val - 1);
           }
-        } else if (subCh == 2) {
-          panelOutputs->m_phoneGain[phoneIdx] = val ? true : false;
-          if (panelOutputs->choicePhoneOut->GetSelection() == phoneIdx) {
-            if (panelOutputs->btnPhoneGain) panelOutputs->btnPhoneGain->SetValue(val ? true : false);
-          }
-          hid->settings[0x3502 + (phoneIdx << 8)] = val;
-        } else if (subCh == 3) {
-          int phoneMix = (val - 50) * 2;
-          panelOutputs->m_phoneMix[phoneIdx] = phoneMix;
-          if (panelOutputs->choicePhoneOut->GetSelection() == phoneIdx) {
-            if (panelOutputs->mixKnob) panelOutputs->mixKnob->SetValue(phoneMix);
-          }
+          hid->settings[ch16] = val;
         }
+      } else if (subCh == 2) {
+        panelOutputs->m_phoneGain[phoneIdx] = val ? true : false;
+        if (panelOutputs->choicePhoneOut->GetSelection() == phoneIdx) {
+          if (panelOutputs->btnPhoneGain)
+            panelOutputs->btnPhoneGain->SetValue(val ? true : false);
+        }
+        hid->settings[ch16] = val;
+      } else if (subCh == 3) {
+        int phoneMix = (val - 50) * 2;
+        panelOutputs->m_phoneMix[phoneIdx] = phoneMix;
+        if (panelOutputs->choicePhoneOut->GetSelection() == phoneIdx) {
+          if (panelOutputs->mixKnob)
+            panelOutputs->mixKnob->SetValue(phoneMix);
+          panelOutputs->updatePhoneMixLabel(phoneMix);
+        }
+        hid->settings[ch16] = val;
       }
-      break;
-    case 0x06: 
+    } else if (logicCh == 0x06) {
       if (subCh == 1 || subCh == 2) {
-        if (panelOutputs->btnPhoneIcon[0]) panelOutputs->btnPhoneIcon[0]->SetValue(val); 
+        if (panelOutputs->btnPhoneIcon[0])
+          panelOutputs->btnPhoneIcon[0]->SetValue(val);
       } else {
-        if (panelOutputs->btnTRS[0]) panelOutputs->btnTRS[0]->SetValue(val);
+        if (panelOutputs->btnTRS[0])
+          panelOutputs->btnTRS[0]->SetValue(val);
       }
-      break;
-    default: 
-      if (logicCh < 6) {
-        if (vGauge < 0) vGauge = 0;
-        else if (vGauge > panelOutputs->LEVEL_RANGE) vGauge = panelOutputs->LEVEL_RANGE;
-        
+    } else {
+      if (logicCh < 6 && subCh == 1) {
+        if (vGauge < 0)
+          vGauge = 0;
+        else if (vGauge > panelOutputs->LEVEL_RANGE)
+          vGauge = panelOutputs->LEVEL_RANGE;
+
         panelOutputs->outLevelVal[logicCh] = level01DB;
         int strip = logicCh / 2;
-        bool outLinked = panelOutputs->btnLink[strip] ? panelOutputs->btnLink[strip]->GetValue() : true;
+        bool outLinked = panelOutputs->btnLink[strip]
+                             ? panelOutputs->btnLink[strip]->GetValue()
+                             : true;
         if (outLinked) {
           if (panelOutputs->slOutput[strip]) {
-            panelOutputs->slOutput[strip]->SetMeterLevels(panelOutputs->outLevelVal[strip * 2], panelOutputs->outLevelVal[strip * 2 + 1]);
+            panelOutputs->slOutput[strip]->SetMeterLevels(
+                panelOutputs->outLevelVal[strip * 2],
+                panelOutputs->outLevelVal[strip * 2 + 1]);
           }
         } else {
-          if (panelOutputs->slOutputL[strip]) panelOutputs->slOutputL[strip]->SetMeterLevels(panelOutputs->outLevelVal[strip * 2], -960);
-          if (panelOutputs->slOutputR[strip]) panelOutputs->slOutputR[strip]->SetMeterLevels(panelOutputs->outLevelVal[strip * 2 + 1], -960);
+          if (panelOutputs->slOutputL[strip])
+            panelOutputs->slOutputL[strip]->SetMeterLevels(
+                panelOutputs->outLevelVal[strip * 2], -960);
+          if (panelOutputs->slOutputR[strip])
+            panelOutputs->slOutputR[strip]->SetMeterLevels(
+                panelOutputs->outLevelVal[strip * 2 + 1], -960);
         }
       }
-      break;
     }
   } break;
-  case 0x40: 
-  {
+  case 0x40: {
     int32_t vGauge = level01DB - panelMixers->LEVEL_MIN;
-    int32_t logicBus = ch - 0x41; 
-    if (vGauge < 0) vGauge = 0;
-    else if (vGauge > panelMixers->LEVEL_RANGE) vGauge = panelMixers->LEVEL_RANGE;
-    
-    int stripIdx = 2 + (logicBus / 2); 
+    int32_t logicBus = ch - 0x41;
+    if (vGauge < 0)
+      vGauge = 0;
+    else if (vGauge > panelMixers->LEVEL_RANGE)
+      vGauge = panelMixers->LEVEL_RANGE;
+
+    int stripIdx = 2 + (logicBus / 2);
     if (stripIdx < 6) {
       panelMixers->mixLevelVal[logicBus + 4] = level01DB;
-      bool mixLinked = panelMixers->btnLink[stripIdx] ? panelMixers->btnLink[stripIdx]->GetValue() : true;
+      bool mixLinked = panelMixers->btnLink[stripIdx]
+                           ? panelMixers->btnLink[stripIdx]->GetValue()
+                           : true;
       if (mixLinked) {
         if (panelMixers->slVol[stripIdx]) {
-          panelMixers->slVol[stripIdx]->SetMeterLevels(panelMixers->mixLevelVal[stripIdx * 2], panelMixers->mixLevelVal[stripIdx * 2 + 1]);
+          panelMixers->slVol[stripIdx]->SetMeterLevels(
+              panelMixers->mixLevelVal[stripIdx * 2],
+              panelMixers->mixLevelVal[stripIdx * 2 + 1]);
         }
       } else {
-        if (panelMixers->slVolL[stripIdx]) panelMixers->slVolL[stripIdx]->SetMeterLevels(panelMixers->mixLevelVal[stripIdx * 2], -960);
-        if (panelMixers->slVolR[stripIdx]) panelMixers->slVolR[stripIdx]->SetMeterLevels(panelMixers->mixLevelVal[stripIdx * 2 + 1], -960);
+        if (panelMixers->slVolL[stripIdx])
+          panelMixers->slVolL[stripIdx]->SetMeterLevels(
+              panelMixers->mixLevelVal[stripIdx * 2], -960);
+        if (panelMixers->slVolR[stripIdx])
+          panelMixers->slVolR[stripIdx]->SetMeterLevels(
+              panelMixers->mixLevelVal[stripIdx * 2 + 1], -960);
       }
     }
   } break;
-  case 0x50: 
-  {
+  case 0x50: {
     int32_t vGauge = level01DB - panelOutputs->LEVEL_MIN;
     int32_t logicCh = ch - 0x51;
     if (logicCh < 6) {
-      if (subCh == 1) { 
-        if (vGauge < 0) vGauge = 0;
-        else if (vGauge > panelOutputs->LEVEL_RANGE) vGauge = panelOutputs->LEVEL_RANGE;
-        
+      if (subCh == 1) {
+        if (vGauge < 0)
+          vGauge = 0;
+        else if (vGauge > panelOutputs->LEVEL_RANGE)
+          vGauge = panelOutputs->LEVEL_RANGE;
+
         panelLoopbacks->loopLevelVal[logicCh] = level01DB;
         int strip = logicCh / 2;
-        bool loopLinked = panelLoopbacks->btnLink[strip] ? panelLoopbacks->btnLink[strip]->GetValue() : true;
+        bool loopLinked = panelLoopbacks->btnLink[strip]
+                              ? panelLoopbacks->btnLink[strip]->GetValue()
+                              : true;
         if (loopLinked) {
           if (panelLoopbacks->slOutput[strip]) {
-            panelLoopbacks->slOutput[strip]->SetMeterLevels(panelLoopbacks->loopLevelVal[strip * 2], panelLoopbacks->loopLevelVal[strip * 2 + 1]);
+            panelLoopbacks->slOutput[strip]->SetMeterLevels(
+                panelLoopbacks->loopLevelVal[strip * 2],
+                panelLoopbacks->loopLevelVal[strip * 2 + 1]);
           }
         } else {
-          if (panelLoopbacks->slOutputL[strip]) panelLoopbacks->slOutputL[strip]->SetMeterLevels(panelLoopbacks->loopLevelVal[strip * 2], -960);
-          if (panelLoopbacks->slOutputR[strip]) panelLoopbacks->slOutputR[strip]->SetMeterLevels(panelLoopbacks->loopLevelVal[strip * 2 + 1], -960);
+          if (panelLoopbacks->slOutputL[strip])
+            panelLoopbacks->slOutputL[strip]->SetMeterLevels(
+                panelLoopbacks->loopLevelVal[strip * 2], -960);
+          if (panelLoopbacks->slOutputR[strip])
+            panelLoopbacks->slOutputR[strip]->SetMeterLevels(
+                panelLoopbacks->loopLevelVal[strip * 2 + 1], -960);
         }
-      } else if (subCh == 3) { 
+      } else if (subCh == 3) {
         auto [muted, dummy, gainDB] = gain2dB(val);
         int strip = logicCh / 2;
-        bool loopLinked = panelLoopbacks->btnLink[strip] ? panelLoopbacks->btnLink[strip]->GetValue() : true;
+        bool loopLinked = panelLoopbacks->btnLink[strip]
+                              ? panelLoopbacks->btnLink[strip]->GetValue()
+                              : true;
         if (loopLinked) {
-          if (panelLoopbacks->slOutput[strip]) panelLoopbacks->slOutput[strip]->SetValue(gainDB);
+          if (panelLoopbacks->slOutput[strip])
+            panelLoopbacks->slOutput[strip]->SetValue(gainDB);
         } else {
           if (logicCh % 2 == 0) {
-            if (panelLoopbacks->slOutputL[strip]) panelLoopbacks->slOutputL[strip]->SetValue(gainDB);
+            if (panelLoopbacks->slOutputL[strip])
+              panelLoopbacks->slOutputL[strip]->SetValue(gainDB);
           } else {
-            if (panelLoopbacks->slOutputR[strip]) panelLoopbacks->slOutputR[strip]->SetValue(gainDB);
+            if (panelLoopbacks->slOutputR[strip])
+              panelLoopbacks->slOutputR[strip]->SetValue(gainDB);
           }
         }
       }
-    } else { 
+    } else {
       int loopIdx = logicCh - 6;
       if (loopIdx >= 0 && loopIdx < panelLoopbacks->N_LOOPBACKS) {
         if (panelLoopbacks->cbSelect[loopIdx]) {
@@ -3200,86 +3745,109 @@ void TPMixer::HidReader(hid_device *handle) {
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
       int activeCols = (hid->pid == 0x8754) ? 3 : 2;
       for (int i = 0; i < activeCols; ++i) {
-        int valLeft = panelInputs->LEVEL_MIN + rand() % (panelInputs->LEVEL_RANGE);
-        CallAfter(&TPMixer::scbUpdateLevels, (uint16_t)(0x2104 + (i << 8)), valLeft);
+        int valLeft =
+            panelInputs->LEVEL_MIN + rand() % (panelInputs->LEVEL_RANGE);
+        CallAfter(&TPMixer::scbUpdateLevels, (uint16_t)(0x2104 + (i << 8)),
+                  valLeft);
       }
       for (int i = 0; i < 6; ++i) {
-        int valPlay = panelMixers->LEVEL_MIN + rand() % (panelMixers->LEVEL_RANGE);
-        CallAfter(&TPMixer::scbUpdateLevels, (uint16_t)(0x4101 + (i << 8)), valPlay);
+        int valPlay =
+            panelMixers->LEVEL_MIN + rand() % (panelMixers->LEVEL_RANGE);
+        CallAfter(&TPMixer::scbUpdateLevels, (uint16_t)(0x4101 + (i << 8)),
+                  valPlay);
       }
     }
   }
 }
 
 void ScaleUIElements(wxWindow *win, double scale) {
-  if (!win) return;
+  if (!win)
+    return;
 
-  if (auto btn = dynamic_cast<CustomButton*>(win)) {
+  double fontScale = 1.0 + (scale - 1.0) * 0.4;
+  if (fontScale < 0.8) fontScale = 0.8;
+  if (fontScale > 1.25) fontScale = 1.25;
+
+  if (auto btn = dynamic_cast<CustomButton *>(win)) {
     btn->Rescale(scale);
-  } else if (auto knob = dynamic_cast<KnobControl*>(win)) {
+  } else if (auto knob = dynamic_cast<KnobControl *>(win)) {
     knob->Rescale(scale);
-  } else if (auto meter = dynamic_cast<LevelMeter*>(win)) {
+  } else if (auto meter = dynamic_cast<LevelMeter *>(win)) {
     meter->Rescale(scale);
-  } else if (auto strip = dynamic_cast<FaderStrip*>(win)) {
+  } else if (auto strip = dynamic_cast<FaderStrip *>(win)) {
     strip->Rescale(scale);
-  } else if (auto txt = dynamic_cast<wxStaticText*>(win)) {
-    double baseSize = 8.5;
+  } else if (auto txt = dynamic_cast<wxStaticText *>(win)) {
     wxString lbl = txt->GetLabel();
-    if (txt->GetFont().GetWeight() == wxFONTWEIGHT_BOLD) {
+    double baseSize = 8.5;
+    if (lbl.Contains("TOPPING")) {
+      baseSize = 11.0;
+    } else if (lbl.Contains("Professional")) {
+      baseSize = 8.5;
+    } else if (txt->GetFont().GetWeight() == wxFONTWEIGHT_BOLD) {
       baseSize = 9.5;
-      if (lbl.Contains("TOPPING") || lbl.Contains("Professional")) {
-        baseSize = 13.0;
-      }
     } else if (txt->GetFont().GetFractionalPointSize() < 8.0) {
       baseSize = 7.0;
     }
     wxFont f = txt->GetFont();
-    f.SetFractionalPointSize(baseSize * scale);
+    f.SetFractionalPointSize(baseSize * fontScale);
     txt->SetFont(f);
-  } else if (auto choice = dynamic_cast<wxChoice*>(win)) {
+    txt->InvalidateBestSize();
+    txt->SetMinSize(txt->GetBestSize());
+  } else if (auto choice = dynamic_cast<wxChoice *>(win)) {
     wxFont f = choice->GetFont();
-    f.SetFractionalPointSize(8.5 * scale);
+    f.SetFractionalPointSize(8.5 * fontScale);
     choice->SetFont(f);
-  } else if (auto cb = dynamic_cast<wxComboBox*>(win)) {
+  } else if (auto cb = dynamic_cast<wxComboBox *>(win)) {
     wxFont f = cb->GetFont();
-    f.SetFractionalPointSize(8.5 * scale);
+    f.SetFractionalPointSize(8.5 * fontScale);
     cb->SetFont(f);
   }
 
-  if (win->GetName() == "colPanel" || win->GetName() == "stripPanel" || win->GetName() == "monMixPanel") {
+  if (win->GetName() == "colPanel" || win->GetName() == "stripPanel" ||
+      win->GetName() == "monMixPanel") {
     win->SetMinSize(wxSize(120 * scale, -1));
     if (win->GetName() == "monMixPanel") {
       win->SetMaxSize(wxSize(120 * scale, -1));
     }
+  } else if (win->GetName() == "headerPanel") {
+    win->SetMinSize(wxSize(-1, 32 * scale));
+    win->SetMaxSize(wxSize(-1, 32 * scale));
   }
 
   wxWindowList &children = win->GetChildren();
-  for (wxWindowList::iterator it = children.begin(); it != children.end(); ++it) {
-    ScaleUIElements(*it, scale);
+  for (wxWindowList::iterator it = children.begin(); it != children.end();
+       ++it) {
+    wxWindow *child = *it;
+    if (dynamic_cast<wxTopLevelWindow *>(child)) {
+      continue;
+    }
+    ScaleUIElements(child, scale);
   }
 }
 
 void TPMixer::RescaleUI(double scale) {
   int leftWidth = 400;
-  int rightWidth = 680;
-  
+  int rightWidth = 760;
+
   panelInputs->SetMinSize(wxSize(leftWidth * scale, -1));
   panelInputs->SetMaxSize(wxSize(leftWidth * scale, -1));
-  
+
   panelLoopbacks->SetMinSize(wxSize(leftWidth * scale, -1));
   panelLoopbacks->SetMaxSize(wxSize(leftWidth * scale, -1));
-  
+
   panelMixers->SetMinSize(wxSize(rightWidth * scale, -1));
   panelMixers->SetMaxSize(wxSize(rightWidth * scale, -1));
-  
-  int numOutStrips = (hid->pid == 0x8752) ? 1 : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
+
+  int numOutStrips = (hid->pid == 0x8752)
+                         ? 1
+                         : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
   int outputPanelWidth = numOutStrips * 120 + 120;
   panelOutputs->SetMinSize(wxSize(outputPanelWidth * scale, -1));
   panelOutputs->SetMaxSize(wxSize(outputPanelWidth * scale, -1));
 
-  int totalWidth = (leftWidth + rightWidth + 24) * scale;
-  int totalHeight = 580 * scale;
-  SetMinSize(wxSize(totalWidth, totalHeight));
+  // NOTE: Do NOT call SetMinSize here with scaled values.
+  // The window minimum size is fixed at design size so the user can always
+  // shrink the window back after maximizing.
 
   ScaleUIElements(this, scale);
 
@@ -3290,15 +3858,17 @@ void TPMixer::RescaleUI(double scale) {
 void TPMixer::OnSize(wxSizeEvent &event) {
   wxSize size = GetClientSize();
   int leftWidth = 400;
-  int rightWidth = 680;
+  int rightWidth = 760;
   int designWidth = leftWidth + rightWidth + 24;
   int designHeight = 580;
 
   double scaleX = (double)size.x / designWidth;
   double scaleY = (double)size.y / designHeight;
   double newScale = std::min(scaleX, scaleY);
-  if (newScale < 0.5) newScale = 0.5;
-  if (newScale > 3.0) newScale = 3.0;
+  if (newScale < 0.5)
+    newScale = 0.5;
+  if (newScale > 3.0)
+    newScale = 3.0;
 
   if (std::abs(newScale - g_uiScale) > 0.02) {
     g_uiScale = newScale;
@@ -3339,40 +3909,64 @@ void TPMixer::loadSettings() {
         CallAfter(&TPMixer::scbUpdateLevels, key, value);
       }
     }
-    if (NULL != line) free(line);
+    if (NULL != line)
+      free(line);
     fclose(f);
     CallAfter(&TPMixer::refreshMixerUi, -1);
     CallAfter(&TPMixer::refreshLoopbackUi);
     CallAfter(&TPMixer::refreshOutputUi);
-    if (g_uiScale != 1.0) {
-      CallAfter(&TPMixer::RescaleUI, g_uiScale);
+    if (panelInputs->btnLink) {
+      bool linked =
+          hid->settings.contains(0x9000) ? (hid->settings[0x9000] != 0) : true;
+      panelInputs->btnLink->SetValue(linked);
+      if (panelInputs->slGainICombined)
+        panelInputs->slGainICombined->Show(linked);
+      if (panelInputs->slGainI[2])
+        panelInputs->slGainI[2]->Show(!linked);
+      if (panelInputs->slGainI[3])
+        panelInputs->slGainI[3]->Show(!linked);
+      if (panelInputs->combBtnSizer)
+        panelInputs->combBtnSizer->Show(linked);
+      if (panelInputs->splitBtnSizer)
+        panelInputs->splitBtnSizer->Show(!linked);
+      panelInputs->Layout();
     }
+    // Always re-apply scale after loading so panel sizes initialize correctly
+    CallAfter(&TPMixer::RescaleUI, g_uiScale);
   }
 }
 
 void TPMixer::pushGuiStateToDevice() {
-  if (NULL == hid->getHandle()) return;
+  if (NULL == hid->getHandle())
+    return;
 
-  int activeCols = (hid->pid == 0x8754) ? 3 : ((hid->pid == 0x8752 || hid->pid == 0x8756) ? 2 : 1);
+  int activeCols = (hid->pid == 0x8754)
+                       ? 3
+                       : ((hid->pid == 0x8752 || hid->pid == 0x8756) ? 2 : 1);
   for (int col = 0; col < activeCols; ++col) {
     if (col < 2) {
-      if (panelInputs->cbMon[col]) hid->setInputMon(col, panelInputs->cbMon[col]->GetValue());
+      if (panelInputs->cbMon[col])
+        hid->setInputMon(col, panelInputs->cbMon[col]->GetValue());
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      if (panelInputs->cb48V[col]) hid->setInput48V(col, panelInputs->cb48V[col]->GetValue());
+      if (panelInputs->cb48V[col])
+        hid->setInput48V(col, panelInputs->cb48V[col]->GetValue());
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      if (panelInputs->cbInst[col]) hid->setInputInst(col, panelInputs->cbInst[col]->GetValue());
+      if (panelInputs->cbInst[col])
+        hid->setInputInst(col, panelInputs->cbInst[col]->GetValue());
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     sendInput(col, true);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  int numOuts = (hid->pid == 0x8752) ? 1 : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
+  int numOuts = (hid->pid == 0x8752)
+                    ? 1
+                    : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
   for (int i = 0; i < numOuts; ++i) {
     int val = panelOutputs->cbSelect[i]->GetSelection();
     hid->setOutputSel(i, val + 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    
+
     setOutputVol(i);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
@@ -3389,62 +3983,93 @@ void TPMixer::pushGuiStateToDevice() {
 }
 
 void TPMixer::refreshMixerUi(int16_t bus) {
-  if (bus < 0) bus = 0;
-  for (int16_t stripIdx = 0; stripIdx < panelMixers->N_MIX_SRCS / 2; stripIdx++) {
+  if (bus < 0)
+    bus = 0;
+  for (int16_t stripIdx = 0; stripIdx < panelMixers->N_MIX_SRCS / 2;
+       stripIdx++) {
     int l = stripIdx * 2;
     int r = l + 1;
-    
+
     // Left source keys
     uint16_t keyL_L = ((0x61 + bus * 2) << 8) | (l + 1);
     uint16_t keyL_R = ((0x62 + bus * 2) << 8) | (l + 1);
-    
+
     // Right source keys
     uint16_t keyR_L = ((0x61 + bus * 2) << 8) | (r + 1);
     uint16_t keyR_R = ((0x62 + bus * 2) << 8) | (r + 1);
 
     if (hid->settings.contains(keyL_L) && hid->settings.contains(keyL_R) &&
         hid->settings.contains(keyR_L) && hid->settings.contains(keyR_R)) {
-        
-      auto [mutedL, phaseL, panL, gainDBL] = lrGain2PandB(hid->settings[keyL_L], hid->settings[keyL_R], panelMixers->minGain);
-      auto [mutedR, phaseR, panR, gainDBR] = lrGain2PandB(hid->settings[keyR_L], hid->settings[keyR_R], panelMixers->minGain);
 
-      if (panelMixers->slPan[l]) panelMixers->slPan[l]->SetValue(panL);
-      if (panelMixers->slPan[r]) panelMixers->slPan[r]->SetValue(panR);
+      auto [mutedL, phaseL, panL, gainDBL] = lrGain2PandB(
+          hid->settings[keyL_L], hid->settings[keyL_R], panelMixers->minGain);
+      auto [mutedR, phaseR, panR, gainDBR] = lrGain2PandB(
+          hid->settings[keyR_L], hid->settings[keyR_R], panelMixers->minGain);
 
-      bool linked = (gainDBL == gainDBR) && (mutedL == mutedR) && (phaseL == phaseR);
-      if (panelMixers->btnLink[stripIdx]) panelMixers->btnLink[stripIdx]->SetValue(linked);
+      if (panelMixers->slPan[l])
+        panelMixers->slPan[l]->SetValue(panL);
+      if (panelMixers->slPan[r])
+        panelMixers->slPan[r]->SetValue(panR);
+
+      bool linked = hid->settings.contains(0x9100 + stripIdx)
+                        ? (hid->settings[0x9100 + stripIdx] != 0)
+                        : true;
+      if (panelMixers->btnLink[stripIdx])
+        panelMixers->btnLink[stripIdx]->SetValue(linked);
 
       if (linked) {
-        if (panelMixers->slVol[stripIdx]) panelMixers->slVol[stripIdx]->SetValue(gainDBL);
-        if (panelMixers->ckSolo[stripIdx]) panelMixers->ckSolo[stripIdx]->SetValue(false);
-        if (panelMixers->ckMute[stripIdx]) panelMixers->ckMute[stripIdx]->SetValue(mutedL);
-        if (panelMixers->ckPhaseCombined[stripIdx]) panelMixers->ckPhaseCombined[stripIdx]->SetValue(phaseL);
+        if (panelMixers->slVol[stripIdx])
+          panelMixers->slVol[stripIdx]->SetValue(gainDBL);
+        if (panelMixers->ckSolo[stripIdx])
+          panelMixers->ckSolo[stripIdx]->SetValue(false);
+        if (panelMixers->ckMute[stripIdx])
+          panelMixers->ckMute[stripIdx]->SetValue(mutedL);
+        if (panelMixers->ckPhaseCombined[stripIdx])
+          panelMixers->ckPhaseCombined[stripIdx]->SetValue(phaseL);
       } else {
-        if (panelMixers->slVolL[stripIdx]) panelMixers->slVolL[stripIdx]->SetValue(gainDBL);
-        if (panelMixers->slVolR[stripIdx]) panelMixers->slVolR[stripIdx]->SetValue(gainDBR);
+        if (panelMixers->slVolL[stripIdx])
+          panelMixers->slVolL[stripIdx]->SetValue(gainDBL);
+        if (panelMixers->slVolR[stripIdx])
+          panelMixers->slVolR[stripIdx]->SetValue(gainDBR);
 
-        if (panelMixers->ckSoloL[stripIdx]) panelMixers->ckSoloL[stripIdx]->SetValue(false);
-        if (panelMixers->ckSoloR[stripIdx]) panelMixers->ckSoloR[stripIdx]->SetValue(false);
-        if (panelMixers->ckMuteL[stripIdx]) panelMixers->ckMuteL[stripIdx]->SetValue(mutedL);
-        if (panelMixers->ckMuteR[stripIdx]) panelMixers->ckMuteR[stripIdx]->SetValue(mutedR);
+        if (panelMixers->ckSoloL[stripIdx])
+          panelMixers->ckSoloL[stripIdx]->SetValue(false);
+        if (panelMixers->ckSoloR[stripIdx])
+          panelMixers->ckSoloR[stripIdx]->SetValue(false);
+        if (panelMixers->ckMuteL[stripIdx])
+          panelMixers->ckMuteL[stripIdx]->SetValue(mutedL);
+        if (panelMixers->ckMuteR[stripIdx])
+          panelMixers->ckMuteR[stripIdx]->SetValue(mutedR);
 
-        if (panelMixers->ckPhase[l]) panelMixers->ckPhase[l]->SetValue(phaseL);
-        if (panelMixers->ckPhase[r]) panelMixers->ckPhase[r]->SetValue(phaseR);
+        if (panelMixers->ckPhase[l])
+          panelMixers->ckPhase[l]->SetValue(phaseL);
+        if (panelMixers->ckPhase[r])
+          panelMixers->ckPhase[r]->SetValue(phaseR);
       }
 
-      if (panelMixers->slVol[stripIdx]) panelMixers->slVol[stripIdx]->Show(linked);
-      if (panelMixers->slVolL[stripIdx]) panelMixers->slVolL[stripIdx]->Show(!linked);
-      if (panelMixers->slVolR[stripIdx]) panelMixers->slVolR[stripIdx]->Show(!linked);
+      if (panelMixers->slVol[stripIdx])
+        panelMixers->slVol[stripIdx]->Show(linked);
+      if (panelMixers->slVolL[stripIdx])
+        panelMixers->slVolL[stripIdx]->Show(!linked);
+      if (panelMixers->slVolR[stripIdx])
+        panelMixers->slVolR[stripIdx]->Show(!linked);
 
-      if (panelMixers->combBtnSizer[stripIdx]) panelMixers->combBtnSizer[stripIdx]->Show(linked);
-      if (panelMixers->splitBtnSizer[stripIdx]) panelMixers->splitBtnSizer[stripIdx]->Show(!linked);
+      if (panelMixers->combBtnSizer[stripIdx])
+        panelMixers->combBtnSizer[stripIdx]->Show(linked);
+      if (panelMixers->splitBtnSizer[stripIdx])
+        panelMixers->splitBtnSizer[stripIdx]->Show(!linked);
 
       if (panelMixers->lbVolVal[stripIdx]) {
         if (linked) {
-          panelMixers->lbVolVal[stripIdx]->SetLabel(mutedL ? "-inf  -inf" : std::format("{:.0f}  {:.0f}", (double)gainDBL, (double)gainDBL));
+          panelMixers->lbVolVal[stripIdx]->SetLabel(
+              mutedL ? "-inf  -inf"
+                     : std::format("{:.0f}  {:.0f}", (double)gainDBL,
+                                   (double)gainDBL));
         } else {
-          wxString lblL = mutedL ? "-inf" : std::format("{:.0f}", (double)gainDBL);
-          wxString lblR = mutedR ? "-inf" : std::format("{:.0f}", (double)gainDBR);
+          wxString lblL =
+              mutedL ? "-inf" : std::format("{:.0f}", (double)gainDBL);
+          wxString lblR =
+              mutedR ? "-inf" : std::format("{:.0f}", (double)gainDBR);
           panelMixers->lbVolVal[stripIdx]->SetLabel(lblL + "  " + lblR);
         }
       }
@@ -3455,39 +4080,56 @@ void TPMixer::refreshMixerUi(int16_t bus) {
 
 void TPMixer::refreshLoopbackUi() {
   for (int16_t i = 0; i < panelLoopbacks->N_LOOPBACKS; i++) {
-    if (!panelLoopbacks->btnLink[i]) continue;
+    if (!panelLoopbacks->btnLink[i])
+      continue;
     int32_t valL = hid->settings[0x5103 + ((i * 2) << 8)];
     int32_t valR_real = hid->settings[0x5103 + ((i * 2 + 1) << 8)];
-    
+
     auto [mutedL, dummyL, gainDBL] = gain2dB(valL);
     auto [mutedR, dummyR, gainDBR] = gain2dB(valR_real);
-    bool linked = (gainDBL == gainDBR);
+    bool linked = hid->settings.contains(0x9200 + i)
+                      ? (hid->settings[0x9200 + i] != 0)
+                      : true;
 
-    if (panelLoopbacks->btnLink[i]) panelLoopbacks->btnLink[i]->SetValue(linked);
-    
+    if (panelLoopbacks->btnLink[i])
+      panelLoopbacks->btnLink[i]->SetValue(linked);
+
     if (linked) {
-      if (panelLoopbacks->slOutput[i]) panelLoopbacks->slOutput[i]->SetValue(gainDBL);
-      if (panelLoopbacks->ckMute[i]) panelLoopbacks->ckMute[i]->SetValue(mutedL);
+      if (panelLoopbacks->slOutput[i])
+        panelLoopbacks->slOutput[i]->SetValue(gainDBL);
+      if (panelLoopbacks->ckMute[i])
+        panelLoopbacks->ckMute[i]->SetValue(mutedL);
     } else {
-      if (panelLoopbacks->slOutputL[i]) panelLoopbacks->slOutputL[i]->SetValue(gainDBL);
-      if (panelLoopbacks->slOutputR[i]) panelLoopbacks->slOutputR[i]->SetValue(gainDBR);
-      if (panelLoopbacks->ckMuteL[i]) panelLoopbacks->ckMuteL[i]->SetValue(mutedL);
-      if (panelLoopbacks->ckMuteR[i]) panelLoopbacks->ckMuteR[i]->SetValue(mutedR);
+      if (panelLoopbacks->slOutputL[i])
+        panelLoopbacks->slOutputL[i]->SetValue(gainDBL);
+      if (panelLoopbacks->slOutputR[i])
+        panelLoopbacks->slOutputR[i]->SetValue(gainDBR);
+      if (panelLoopbacks->ckMuteL[i])
+        panelLoopbacks->ckMuteL[i]->SetValue(mutedL);
+      if (panelLoopbacks->ckMuteR[i])
+        panelLoopbacks->ckMuteR[i]->SetValue(mutedR);
     }
-    
-    if (panelLoopbacks->slOutput[i]) panelLoopbacks->slOutput[i]->Show(linked);
-    if (panelLoopbacks->slOutputL[i]) panelLoopbacks->slOutputL[i]->Show(!linked);
-    if (panelLoopbacks->slOutputR[i]) panelLoopbacks->slOutputR[i]->Show(!linked);
-    
-    if (panelLoopbacks->combBtnSizer[i]) panelLoopbacks->combBtnSizer[i]->Show(linked);
-    if (panelLoopbacks->splitBtnSizer[i]) panelLoopbacks->splitBtnSizer[i]->Show(!linked);
-    
+
+    if (panelLoopbacks->slOutput[i])
+      panelLoopbacks->slOutput[i]->Show(linked);
+    if (panelLoopbacks->slOutputL[i])
+      panelLoopbacks->slOutputL[i]->Show(!linked);
+    if (panelLoopbacks->slOutputR[i])
+      panelLoopbacks->slOutputR[i]->Show(!linked);
+
+    if (panelLoopbacks->combBtnSizer[i])
+      panelLoopbacks->combBtnSizer[i]->Show(linked);
+    if (panelLoopbacks->splitBtnSizer[i])
+      panelLoopbacks->splitBtnSizer[i]->Show(!linked);
+
     if (panelLoopbacks->lbLoopVolVal[i]) {
       if (mutedL && mutedR) {
         panelLoopbacks->lbLoopVolVal[i]->SetLabel("-inf  -inf");
       } else {
-        wxString lblL = mutedL ? "-inf" : std::format("{:.0f}", (double)gainDBL);
-        wxString lblR = mutedR ? "-inf" : std::format("{:.0f}", (double)gainDBR);
+        wxString lblL =
+            mutedL ? "-inf" : std::format("{:.0f}", (double)gainDBL);
+        wxString lblR =
+            mutedR ? "-inf" : std::format("{:.0f}", (double)gainDBR);
         panelLoopbacks->lbLoopVolVal[i]->SetLabel(lblL + "  " + lblR);
       }
       int32_t selVal = hid->settings[0x5701 + (i << 8)];
@@ -3500,44 +4142,62 @@ void TPMixer::refreshLoopbackUi() {
 }
 
 void TPMixer::refreshOutputUi() {
-  int numOuts = (hid->pid == 0x8752) ? 1 : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
+  int numOuts = (hid->pid == 0x8752)
+                    ? 1
+                    : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
   for (int16_t i = 0; i < numOuts; i++) {
     int32_t valL = hid->settings[0x3103 + ((i * 2) << 8)];
     int32_t valR = hid->settings[0x3103 + ((i * 2 + 1) << 8)];
-    
+
     auto [mutedL, dummyL, gainDBL] = gain2dB(valL);
     auto [mutedR, dummyR, gainDBR] = gain2dB(valR);
-    bool linked = (gainDBL == gainDBR);
+    bool linked = hid->settings.contains(0x9300 + i)
+                      ? (hid->settings[0x9300 + i] != 0)
+                      : true;
 
-    if (panelOutputs->btnLink[i]) panelOutputs->btnLink[i]->SetValue(linked);
-    
+    if (panelOutputs->btnLink[i])
+      panelOutputs->btnLink[i]->SetValue(linked);
+
     if (linked) {
-      if (panelOutputs->slOutput[i]) panelOutputs->slOutput[i]->SetValue(gainDBL);
-      if (i > 0 && panelOutputs->ckMute[i]) panelOutputs->ckMute[i]->SetValue(mutedL);
+      if (panelOutputs->slOutput[i])
+        panelOutputs->slOutput[i]->SetValue(gainDBL);
+      if (i > 0 && panelOutputs->ckMute[i])
+        panelOutputs->ckMute[i]->SetValue(mutedL);
     } else {
-      if (panelOutputs->slOutputL[i]) panelOutputs->slOutputL[i]->SetValue(gainDBL);
-      if (panelOutputs->slOutputR[i]) panelOutputs->slOutputR[i]->SetValue(gainDBR);
+      if (panelOutputs->slOutputL[i])
+        panelOutputs->slOutputL[i]->SetValue(gainDBL);
+      if (panelOutputs->slOutputR[i])
+        panelOutputs->slOutputR[i]->SetValue(gainDBR);
       if (i > 0) {
-        if (panelOutputs->ckMuteL[i]) panelOutputs->ckMuteL[i]->SetValue(mutedL);
-        if (panelOutputs->ckMuteR[i]) panelOutputs->ckMuteR[i]->SetValue(mutedR);
+        if (panelOutputs->ckMuteL[i])
+          panelOutputs->ckMuteL[i]->SetValue(mutedL);
+        if (panelOutputs->ckMuteR[i])
+          panelOutputs->ckMuteR[i]->SetValue(mutedR);
       }
     }
-    
-    if (panelOutputs->slOutput[i]) panelOutputs->slOutput[i]->Show(linked);
-    if (panelOutputs->slOutputL[i]) panelOutputs->slOutputL[i]->Show(!linked);
-    if (panelOutputs->slOutputR[i]) panelOutputs->slOutputR[i]->Show(!linked);
-    
+
+    if (panelOutputs->slOutput[i])
+      panelOutputs->slOutput[i]->Show(linked);
+    if (panelOutputs->slOutputL[i])
+      panelOutputs->slOutputL[i]->Show(!linked);
+    if (panelOutputs->slOutputR[i])
+      panelOutputs->slOutputR[i]->Show(!linked);
+
     if (i > 0) {
-      if (panelOutputs->combBtnSizer[i]) panelOutputs->combBtnSizer[i]->Show(linked);
-      if (panelOutputs->splitBtnSizer[i]) panelOutputs->splitBtnSizer[i]->Show(!linked);
+      if (panelOutputs->combBtnSizer[i])
+        panelOutputs->combBtnSizer[i]->Show(linked);
+      if (panelOutputs->splitBtnSizer[i])
+        panelOutputs->splitBtnSizer[i]->Show(!linked);
     }
-    
+
     if (panelOutputs->lbOutVolVal[i]) {
       if (mutedL && mutedR) {
         panelOutputs->lbOutVolVal[i]->SetLabel("-inf  -inf");
       } else {
-        wxString lblL = mutedL ? "-inf" : std::format("{:.0f}", (double)gainDBL);
-        wxString lblR = mutedR ? "-inf" : std::format("{:.0f}", (double)gainDBR);
+        wxString lblL =
+            mutedL ? "-inf" : std::format("{:.0f}", (double)gainDBL);
+        wxString lblR =
+            mutedR ? "-inf" : std::format("{:.0f}", (double)gainDBR);
         panelOutputs->lbOutVolVal[i]->SetLabel(lblL + "  " + lblR);
       }
       int32_t selVal = hid->settings[0x3501 + (i << 8)];
@@ -3546,29 +4206,58 @@ void TPMixer::refreshOutputUi() {
       }
     }
   }
+  uint8_t phoneBase = hid->phoneRegOffset();
+  for (int phoneIdx = 0; phoneIdx < 2; ++phoneIdx) {
+    uint16_t keyGain = ((phoneBase + phoneIdx) << 8) | 2;
+    uint16_t keyMix = ((phoneBase + phoneIdx) << 8) | 3;
+    if (hid->settings.contains(keyGain)) {
+      panelOutputs->m_phoneGain[phoneIdx] = (hid->settings[keyGain] != 0);
+    }
+    if (hid->settings.contains(keyMix)) {
+      int32_t val = hid->settings[keyMix];
+      panelOutputs->m_phoneMix[phoneIdx] = (val - 50) * 2;
+    }
+  }
+  int curPhone = panelOutputs->choicePhoneOut->GetSelection();
+  if (curPhone != wxNOT_FOUND) {
+    if (panelOutputs->mixKnob) {
+      panelOutputs->mixKnob->SetValue(panelOutputs->m_phoneMix[curPhone]);
+    }
+    if (panelOutputs->btnPhoneGain) {
+      panelOutputs->btnPhoneGain->SetValue(panelOutputs->m_phoneGain[curPhone]);
+    }
+    panelOutputs->updatePhoneMixLabel(panelOutputs->m_phoneMix[curPhone]);
+  }
   panelOutputs->Layout();
 }
 
 void TPMixer::OnInputGain(wxCommandEvent &event) {
   int32_t id = event.GetId();
   int32_t ch = id & 0x0f;
-  
+
   int colMap = (ch >= 2) ? 2 : ch;
-  bool inputLinked = (panelInputs->btnLink) ? panelInputs->btnLink->GetValue() : true;
-  
+  bool inputLinked =
+      (panelInputs->btnLink) ? panelInputs->btnLink->GetValue() : true;
+
   if (panelInputs->lbGainVal[colMap]) {
     int32_t gainDB = 0;
     if (colMap < 2) {
-      if (panelInputs->slGainI[colMap]) gainDB = panelInputs->slGainI[colMap]->GetValue();
+      if (panelInputs->slGainI[colMap])
+        gainDB = panelInputs->slGainI[colMap]->GetValue();
       panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} dB", gainDB));
     } else {
       if (inputLinked) {
-        if (panelInputs->slGainICombined) gainDB = panelInputs->slGainICombined->GetValue();
-        panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} dB", gainDB));
+        if (panelInputs->slGainICombined)
+          gainDB = panelInputs->slGainICombined->GetValue();
+        panelInputs->lbGainVal[colMap]->SetLabel(
+            std::format("{:+} dB", gainDB));
       } else {
-        int32_t gainDBL = panelInputs->slGainI[2] ? panelInputs->slGainI[2]->GetValue() : 0;
-        int32_t gainDBR = panelInputs->slGainI[3] ? panelInputs->slGainI[3]->GetValue() : 0;
-        panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} / {:+}", gainDBL, gainDBR));
+        int32_t gainDBL =
+            panelInputs->slGainI[2] ? panelInputs->slGainI[2]->GetValue() : 0;
+        int32_t gainDBR =
+            panelInputs->slGainI[3] ? panelInputs->slGainI[3]->GetValue() : 0;
+        panelInputs->lbGainVal[colMap]->SetLabel(
+            std::format("{:+} / {:+}", gainDBL, gainDBR));
       }
     }
   }
@@ -3581,13 +4270,16 @@ void TPMixer::OnInputGain(wxCommandEvent &event) {
     sendInput(ch, true, id);
     break;
   case ID_INPUT_48V:
-    if (panelInputs->cb48V[ch]) hid->setInput48V(ch, panelInputs->cb48V[ch]->GetValue());
+    if (panelInputs->cb48V[ch])
+      hid->setInput48V(ch, panelInputs->cb48V[ch]->GetValue());
     break;
   case ID_INPUT_MON:
-    if (panelInputs->cbMon[ch]) hid->setInputMon(ch, panelInputs->cbMon[ch]->GetValue());
+    if (panelInputs->cbMon[ch])
+      hid->setInputMon(ch, panelInputs->cbMon[ch]->GetValue());
     break;
   case ID_INPUT_INST:
-    if (panelInputs->cbInst[ch]) hid->setInputInst(ch, panelInputs->cbInst[ch]->GetValue());
+    if (panelInputs->cbInst[ch])
+      hid->setInputInst(ch, panelInputs->cbInst[ch]->GetValue());
     break;
   }
 }
@@ -3605,22 +4297,32 @@ void TPMixer::OnMixVolumeChanged(int stripIdx) {
   int32_t bus = 0;
   for (int t = 0; t < panelMixers->N_MIXERS; ++t) {
     if (panelMixers->tabButtons[t] && panelMixers->tabButtons[t]->GetValue()) {
-      bus = t; break;
+      bus = t;
+      break;
     }
   }
 
-  bool linked = panelMixers->btnLink[stripIdx] ? panelMixers->btnLink[stripIdx]->GetValue() : true;
-  
-  int32_t panL = panelMixers->slPan[stripIdx*2] ? panelMixers->slPan[stripIdx*2]->GetValue() : -100;
-  int32_t panR = panelMixers->slPan[stripIdx*2+1] ? panelMixers->slPan[stripIdx*2+1]->GetValue() : 100;
-  
+  bool linked = panelMixers->btnLink[stripIdx]
+                    ? panelMixers->btnLink[stripIdx]->GetValue()
+                    : true;
+
+  int32_t panL = panelMixers->slPan[stripIdx * 2]
+                     ? panelMixers->slPan[stripIdx * 2]->GetValue()
+                     : -100;
+  int32_t panR = panelMixers->slPan[stripIdx * 2 + 1]
+                     ? panelMixers->slPan[stripIdx * 2 + 1]->GetValue()
+                     : 100;
+
   bool anySolo = false;
-  for (int i = 0; i < panelMixers->N_MIX_SRCS/2; ++i) {
+  for (int i = 0; i < panelMixers->N_MIX_SRCS / 2; ++i) {
     if (panelMixers->btnLink[i] && panelMixers->btnLink[i]->GetValue()) {
-      if (panelMixers->ckSolo[i] && panelMixers->ckSolo[i]->GetValue()) anySolo = true;
+      if (panelMixers->ckSolo[i] && panelMixers->ckSolo[i]->GetValue())
+        anySolo = true;
     } else {
-      if (panelMixers->ckSoloL[i] && panelMixers->ckSoloL[i]->GetValue()) anySolo = true;
-      if (panelMixers->ckSoloR[i] && panelMixers->ckSoloR[i]->GetValue()) anySolo = true;
+      if (panelMixers->ckSoloL[i] && panelMixers->ckSoloL[i]->GetValue())
+        anySolo = true;
+      if (panelMixers->ckSoloR[i] && panelMixers->ckSoloR[i]->GetValue())
+        anySolo = true;
     }
   }
 
@@ -3630,10 +4332,18 @@ void TPMixer::OnMixVolumeChanged(int stripIdx) {
   bool phaseL = false, phaseR = false;
 
   if (linked) {
-    int32_t gainDB = panelMixers->slVol[stripIdx] ? panelMixers->slVol[stripIdx]->GetValue() : 0;
-    bool mute = panelMixers->ckMute[stripIdx] ? panelMixers->ckMute[stripIdx]->GetValue() : false;
-    bool solo = panelMixers->ckSolo[stripIdx] ? panelMixers->ckSolo[stripIdx]->GetValue() : false;
-    bool phase = panelMixers->ckPhaseCombined[stripIdx] ? panelMixers->ckPhaseCombined[stripIdx]->GetValue() : false;
+    int32_t gainDB = panelMixers->slVol[stripIdx]
+                         ? panelMixers->slVol[stripIdx]->GetValue()
+                         : 0;
+    bool mute = panelMixers->ckMute[stripIdx]
+                    ? panelMixers->ckMute[stripIdx]->GetValue()
+                    : false;
+    bool solo = panelMixers->ckSolo[stripIdx]
+                    ? panelMixers->ckSolo[stripIdx]->GetValue()
+                    : false;
+    bool phase = panelMixers->ckPhaseCombined[stripIdx]
+                     ? panelMixers->ckPhaseCombined[stripIdx]->GetValue()
+                     : false;
 
     gainDBL = gainDBR = gainDB;
     muteL = muteR = mute;
@@ -3644,32 +4354,55 @@ void TPMixer::OnMixVolumeChanged(int stripIdx) {
       if (mute || gainDB <= -60) {
         panelMixers->lbVolVal[stripIdx]->SetLabel("-inf  -inf");
       } else {
-        panelMixers->lbVolVal[stripIdx]->SetLabel(std::format("{:.0f}  {:.0f}", (double)gainDB, (double)gainDB));
+        panelMixers->lbVolVal[stripIdx]->SetLabel(
+            std::format("{:.0f}  {:.0f}", (double)gainDB, (double)gainDB));
       }
     }
   } else {
-    gainDBL = panelMixers->slVolL[stripIdx] ? panelMixers->slVolL[stripIdx]->GetValue() : 0;
-    gainDBR = panelMixers->slVolR[stripIdx] ? panelMixers->slVolR[stripIdx]->GetValue() : 0;
-    muteL = panelMixers->ckMuteL[stripIdx] ? panelMixers->ckMuteL[stripIdx]->GetValue() : false;
-    muteR = panelMixers->ckMuteR[stripIdx] ? panelMixers->ckMuteR[stripIdx]->GetValue() : false;
-    soloL = panelMixers->ckSoloL[stripIdx] ? panelMixers->ckSoloL[stripIdx]->GetValue() : false;
-    soloR = panelMixers->ckSoloR[stripIdx] ? panelMixers->ckSoloR[stripIdx]->GetValue() : false;
-    phaseL = panelMixers->ckPhase[stripIdx * 2] ? panelMixers->ckPhase[stripIdx * 2]->GetValue() : false;
-    phaseR = panelMixers->ckPhase[stripIdx * 2 + 1] ? panelMixers->ckPhase[stripIdx * 2 + 1]->GetValue() : false;
+    gainDBL = panelMixers->slVolL[stripIdx]
+                  ? panelMixers->slVolL[stripIdx]->GetValue()
+                  : 0;
+    gainDBR = panelMixers->slVolR[stripIdx]
+                  ? panelMixers->slVolR[stripIdx]->GetValue()
+                  : 0;
+    muteL = panelMixers->ckMuteL[stripIdx]
+                ? panelMixers->ckMuteL[stripIdx]->GetValue()
+                : false;
+    muteR = panelMixers->ckMuteR[stripIdx]
+                ? panelMixers->ckMuteR[stripIdx]->GetValue()
+                : false;
+    soloL = panelMixers->ckSoloL[stripIdx]
+                ? panelMixers->ckSoloL[stripIdx]->GetValue()
+                : false;
+    soloR = panelMixers->ckSoloR[stripIdx]
+                ? panelMixers->ckSoloR[stripIdx]->GetValue()
+                : false;
+    phaseL = panelMixers->ckPhase[stripIdx * 2]
+                 ? panelMixers->ckPhase[stripIdx * 2]->GetValue()
+                 : false;
+    phaseR = panelMixers->ckPhase[stripIdx * 2 + 1]
+                 ? panelMixers->ckPhase[stripIdx * 2 + 1]->GetValue()
+                 : false;
 
     if (panelMixers->lbVolVal[stripIdx]) {
-      wxString lblL = (muteL || gainDBL <= -60) ? "-inf" : std::format("{:.0f}", (double)gainDBL);
-      wxString lblR = (muteR || gainDBR <= -60) ? "-inf" : std::format("{:.0f}", (double)gainDBR);
+      wxString lblL = (muteL || gainDBL <= -60)
+                          ? "-inf"
+                          : std::format("{:.0f}", (double)gainDBL);
+      wxString lblR = (muteR || gainDBR <= -60)
+                          ? "-inf"
+                          : std::format("{:.0f}", (double)gainDBR);
       panelMixers->lbVolVal[stripIdx]->SetLabel(lblL + "  " + lblR);
     }
   }
 
-  auto [gL_L, gL_R] = gain->getStereoGain(gainDBL, muteL, soloL, anySolo, phaseL, panL); 
-  auto [gR_L, gR_R] = gain->getStereoGain(gainDBR, muteR, soloR, anySolo, phaseR, panR);
+  auto [gL_L, gL_R] =
+      gain->getStereoGain(gainDBL, muteL, soloL, anySolo, phaseL, panL);
+  auto [gR_L, gR_R] =
+      gain->getStereoGain(gainDBR, muteR, soloR, anySolo, phaseR, panR);
   hid->setMixVol(bus, stripIdx * 2, gL_L, gL_R);
   hid->settings[((0x61 + bus * 2) << 8) | (stripIdx * 2 + 1)] = gL_L;
   hid->settings[((0x62 + bus * 2) << 8) | (stripIdx * 2 + 1)] = gL_R;
-  
+
   hid->setMixVol(bus, stripIdx * 2 + 1, gR_L, gR_R);
   hid->settings[((0x61 + bus * 2) << 8) | (stripIdx * 2 + 2)] = gR_L;
   hid->settings[((0x62 + bus * 2) << 8) | (stripIdx * 2 + 2)] = gR_R;
@@ -3678,25 +4411,35 @@ void TPMixer::OnMixVolumeChanged(int stripIdx) {
 void TPMixer::OnOutputVolume(wxCommandEvent &event) {
   int32_t id = event.GetId();
   int32_t ch = id & 0x0f;
-  bool linked = panelOutputs->btnLink[ch] ? panelOutputs->btnLink[ch]->GetValue() : true;
-  
+  bool linked =
+      panelOutputs->btnLink[ch] ? panelOutputs->btnLink[ch]->GetValue() : true;
+
   if (panelOutputs->lbOutVolVal[ch]) {
     if (linked) {
-      int32_t val = panelOutputs->slOutput[ch] ? panelOutputs->slOutput[ch]->GetValue() : 0;
+      int32_t val = panelOutputs->slOutput[ch]
+                        ? panelOutputs->slOutput[ch]->GetValue()
+                        : 0;
       if (val <= -60) {
         panelOutputs->lbOutVolVal[ch]->SetLabel("-inf  -inf");
       } else {
-        panelOutputs->lbOutVolVal[ch]->SetLabel(std::format("{:.0f}  {:.0f}", (double)val, (double)val));
+        panelOutputs->lbOutVolVal[ch]->SetLabel(
+            std::format("{:.0f}  {:.0f}", (double)val, (double)val));
       }
     } else {
-      int32_t valL = panelOutputs->slOutputL[ch] ? panelOutputs->slOutputL[ch]->GetValue() : 0;
-      int32_t valR = panelOutputs->slOutputR[ch] ? panelOutputs->slOutputR[ch]->GetValue() : 0;
-      wxString lblL = (valL <= -60) ? "-inf" : std::format("{:.0f}", (double)valL);
-      wxString lblR = (valR <= -60) ? "-inf" : std::format("{:.0f}", (double)valR);
+      int32_t valL = panelOutputs->slOutputL[ch]
+                         ? panelOutputs->slOutputL[ch]->GetValue()
+                         : 0;
+      int32_t valR = panelOutputs->slOutputR[ch]
+                         ? panelOutputs->slOutputR[ch]->GetValue()
+                         : 0;
+      wxString lblL =
+          (valL <= -60) ? "-inf" : std::format("{:.0f}", (double)valL);
+      wxString lblR =
+          (valR <= -60) ? "-inf" : std::format("{:.0f}", (double)valR);
       panelOutputs->lbOutVolVal[ch]->SetLabel(lblL + "  " + lblR);
     }
   }
-  
+
   setOutputVol(ch);
 }
 
@@ -3704,7 +4447,7 @@ void TPMixer::OnOutputToggle(wxCommandEvent &event) {
   int32_t id = event.GetId();
   int32_t ch = id & 0x0f;
   int32_t val = event.GetInt();
-  
+
   switch (id & (~0xf)) {
   case ID_OUTPUT_SEL:
     hid->setOutputSel(ch, val + 1);
@@ -3725,24 +4468,41 @@ void TPMixer::OnOutputToggle(wxCommandEvent &event) {
 void TPMixer::OnLoopVolume(wxCommandEvent &event) {
   int32_t id = event.GetId();
   int32_t ch = id & 0x0f;
-  bool linked = panelLoopbacks->btnLink[ch] ? panelLoopbacks->btnLink[ch]->GetValue() : true;
-  bool mute = panelLoopbacks->ckMute[ch] ? panelLoopbacks->ckMute[ch]->GetValue() : false;
-  
+  bool linked = panelLoopbacks->btnLink[ch]
+                    ? panelLoopbacks->btnLink[ch]->GetValue()
+                    : true;
+  bool mute = panelLoopbacks->ckMute[ch]
+                  ? panelLoopbacks->ckMute[ch]->GetValue()
+                  : false;
+
   if (panelLoopbacks->lbLoopVolVal[ch]) {
     if (linked) {
-      int32_t val = panelLoopbacks->slOutput[ch] ? panelLoopbacks->slOutput[ch]->GetValue() : 0;
+      int32_t val = panelLoopbacks->slOutput[ch]
+                        ? panelLoopbacks->slOutput[ch]->GetValue()
+                        : 0;
       if (mute || val <= -60) {
         panelLoopbacks->lbLoopVolVal[ch]->SetLabel("-inf  -inf");
       } else {
-        panelLoopbacks->lbLoopVolVal[ch]->SetLabel(std::format("{:.0f}  {:.0f}", (double)val, (double)val));
+        panelLoopbacks->lbLoopVolVal[ch]->SetLabel(
+            std::format("{:.0f}  {:.0f}", (double)val, (double)val));
       }
     } else {
-      int32_t valL = panelLoopbacks->slOutputL[ch] ? panelLoopbacks->slOutputL[ch]->GetValue() : 0;
-      int32_t valR = panelLoopbacks->slOutputR[ch] ? panelLoopbacks->slOutputR[ch]->GetValue() : 0;
-      bool muteL = panelLoopbacks->ckMuteL[ch] ? panelLoopbacks->ckMuteL[ch]->GetValue() : false;
-      bool muteR = panelLoopbacks->ckMuteR[ch] ? panelLoopbacks->ckMuteR[ch]->GetValue() : false;
-      wxString lblL = (muteL || valL <= -60) ? "-inf" : std::format("{:.0f}", (double)valL);
-      wxString lblR = (muteR || valR <= -60) ? "-inf" : std::format("{:.0f}", (double)valR);
+      int32_t valL = panelLoopbacks->slOutputL[ch]
+                         ? panelLoopbacks->slOutputL[ch]->GetValue()
+                         : 0;
+      int32_t valR = panelLoopbacks->slOutputR[ch]
+                         ? panelLoopbacks->slOutputR[ch]->GetValue()
+                         : 0;
+      bool muteL = panelLoopbacks->ckMuteL[ch]
+                       ? panelLoopbacks->ckMuteL[ch]->GetValue()
+                       : false;
+      bool muteR = panelLoopbacks->ckMuteR[ch]
+                       ? panelLoopbacks->ckMuteR[ch]->GetValue()
+                       : false;
+      wxString lblL =
+          (muteL || valL <= -60) ? "-inf" : std::format("{:.0f}", (double)valL);
+      wxString lblR =
+          (muteR || valR <= -60) ? "-inf" : std::format("{:.0f}", (double)valR);
       panelLoopbacks->lbLoopVolVal[ch]->SetLabel(lblL + "  " + lblR);
     }
   }
@@ -3754,7 +4514,7 @@ void TPMixer::OnLoopToggle(wxCommandEvent &event) {
   int32_t id = event.GetId();
   int32_t ch = id & 0x0f;
   int32_t val = event.GetInt();
-  
+
   if ((id & (~0xf)) == ID_LOOP_SEL) {
     hid->setLoopSel(ch, val + 1);
   } else {
@@ -3765,15 +4525,18 @@ void TPMixer::OnLoopToggle(wxCommandEvent &event) {
 void TPMixer::OnPhoneMix(wxCommandEvent &event) {
   int32_t val = event.GetInt();
   int idx = panelOutputs->choicePhoneOut->GetSelection();
-  if (idx == wxNOT_FOUND) return;
+  if (idx == wxNOT_FOUND)
+    return;
   panelOutputs->m_phoneMix[idx] = val;
+  panelOutputs->updatePhoneMixLabel(val);
   hid->setPhoneMix(idx, val);
 }
 
 void TPMixer::OnPhoneGain(wxCommandEvent &event) {
   int32_t val = event.GetInt();
   int idx = panelOutputs->choicePhoneOut->GetSelection();
-  if (idx == wxNOT_FOUND) return;
+  if (idx == wxNOT_FOUND)
+    return;
   panelOutputs->m_phoneGain[idx] = val ? true : false;
   hid->setPhoneGainBoost(idx, val);
 }
@@ -3791,28 +4554,21 @@ void TPMixer::OnClose(wxCloseEvent &event) {
   hid = nullptr;
   delete gain;
   gain = nullptr;
-  
+
   event.Skip();
 }
 
 void TPMixer::OnLoad(wxCommandEvent &event) {
   loadSettings();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
   if (NULL != hid->getHandle()) {
-    if (hid->pid == 0x8754) {
-      hid->requestDeviceDump();
-    } else {
-      CallAfter(&TPMixer::pushGuiStateToDevice);
-    }
+    hid->requestDeviceDump();
   }
 }
 
-void TPMixer::OnSave(wxCommandEvent &event) {
-  saveSettings();
-}
+void TPMixer::OnSave(wxCommandEvent &event) { saveSettings(); }
 
-void TPMixer::OnDeviceSave(wxCommandEvent &event) {
-  hid->saveDeviceDefault();
-}
+void TPMixer::OnDeviceSave(wxCommandEvent &event) { hid->saveDeviceDefault(); }
 
 void TPMixer::OnInputPeak(wxCommandEvent &event) {
   uint32_t id = event.GetId();
@@ -3832,117 +4588,201 @@ void TPMixer::OnLinkToggle(wxCommandEvent &event) {
 
   if (cls == ID_INPUT_LINK) {
     bool linked = panelInputs->btnLink->GetValue();
+    hid->settings[0x9000] = linked ? 1 : 0;
     if (linked) {
-      int32_t lVal = panelInputs->slGainI[2] ? panelInputs->slGainI[2]->GetValue() : 0;
-      if (panelInputs->slGainICombined) panelInputs->slGainICombined->SetValue(lVal);
-      if (panelInputs->cbMute[2] && panelInputs->cbMuteL) panelInputs->cbMute[2]->SetValue(panelInputs->cbMuteL->GetValue());
-      if (panelInputs->cbSolo[2] && panelInputs->cbSoloL) panelInputs->cbSolo[2]->SetValue(panelInputs->cbSoloL->GetValue());
-      if (panelInputs->cbPhase[2] && panelInputs->cbPhaseL) panelInputs->cbPhase[2]->SetValue(panelInputs->cbPhaseL->GetValue());
+      int32_t lVal =
+          panelInputs->slGainI[2] ? panelInputs->slGainI[2]->GetValue() : 0;
+      if (panelInputs->slGainICombined)
+        panelInputs->slGainICombined->SetValue(lVal);
+      if (panelInputs->cbMute[2] && panelInputs->cbMuteL)
+        panelInputs->cbMute[2]->SetValue(panelInputs->cbMuteL->GetValue());
+      if (panelInputs->cbSolo[2] && panelInputs->cbSoloL)
+        panelInputs->cbSolo[2]->SetValue(panelInputs->cbSoloL->GetValue());
+      if (panelInputs->cbPhase[2] && panelInputs->cbPhaseL)
+        panelInputs->cbPhase[2]->SetValue(panelInputs->cbPhaseL->GetValue());
     } else {
-      int32_t combVal = panelInputs->slGainICombined ? panelInputs->slGainICombined->GetValue() : 0;
-      bool combMute = panelInputs->cbMute[2] ? panelInputs->cbMute[2]->GetValue() : false;
-      bool combSolo = panelInputs->cbSolo[2] ? panelInputs->cbSolo[2]->GetValue() : false;
-      bool combPhase = panelInputs->cbPhase[2] ? panelInputs->cbPhase[2]->GetValue() : false;
+      int32_t combVal = panelInputs->slGainICombined
+                            ? panelInputs->slGainICombined->GetValue()
+                            : 0;
+      bool combMute =
+          panelInputs->cbMute[2] ? panelInputs->cbMute[2]->GetValue() : false;
+      bool combSolo =
+          panelInputs->cbSolo[2] ? panelInputs->cbSolo[2]->GetValue() : false;
+      bool combPhase =
+          panelInputs->cbPhase[2] ? panelInputs->cbPhase[2]->GetValue() : false;
 
-      if (panelInputs->slGainI[2]) panelInputs->slGainI[2]->SetValue(combVal);
-      if (panelInputs->slGainI[3]) panelInputs->slGainI[3]->SetValue(combVal);
-      if (panelInputs->cbMuteL) panelInputs->cbMuteL->SetValue(combMute);
-      if (panelInputs->cbMuteR) panelInputs->cbMuteR->SetValue(combMute);
-      if (panelInputs->cbSoloL) panelInputs->cbSoloL->SetValue(combSolo);
-      if (panelInputs->cbSoloR) panelInputs->cbSoloR->SetValue(combSolo);
-      if (panelInputs->cbPhaseL) panelInputs->cbPhaseL->SetValue(combPhase);
-      if (panelInputs->cbPhaseR) panelInputs->cbPhaseR->SetValue(combPhase);
+      if (panelInputs->slGainI[2])
+        panelInputs->slGainI[2]->SetValue(combVal);
+      if (panelInputs->slGainI[3])
+        panelInputs->slGainI[3]->SetValue(combVal);
+      if (panelInputs->cbMuteL)
+        panelInputs->cbMuteL->SetValue(combMute);
+      if (panelInputs->cbMuteR)
+        panelInputs->cbMuteR->SetValue(combMute);
+      if (panelInputs->cbSoloL)
+        panelInputs->cbSoloL->SetValue(combSolo);
+      if (panelInputs->cbSoloR)
+        panelInputs->cbSoloR->SetValue(combSolo);
+      if (panelInputs->cbPhaseL)
+        panelInputs->cbPhaseL->SetValue(combPhase);
+      if (panelInputs->cbPhaseR)
+        panelInputs->cbPhaseR->SetValue(combPhase);
     }
-    if (panelInputs->slGainICombined) panelInputs->slGainICombined->Show(linked);
-    if (panelInputs->slGainI[2]) panelInputs->slGainI[2]->Show(!linked);
-    if (panelInputs->slGainI[3]) panelInputs->slGainI[3]->Show(!linked);
-    
-    if (panelInputs->combBtnSizer) panelInputs->combBtnSizer->Show(linked);
-    if (panelInputs->splitBtnSizer) panelInputs->splitBtnSizer->Show(!linked);
+    if (panelInputs->slGainICombined)
+      panelInputs->slGainICombined->Show(linked);
+    if (panelInputs->slGainI[2])
+      panelInputs->slGainI[2]->Show(!linked);
+    if (panelInputs->slGainI[3])
+      panelInputs->slGainI[3]->Show(!linked);
+
+    if (panelInputs->combBtnSizer)
+      panelInputs->combBtnSizer->Show(linked);
+    if (panelInputs->splitBtnSizer)
+      panelInputs->splitBtnSizer->Show(!linked);
 
     panelInputs->Layout();
     sendInput(2, true);
-  }
-  else if (cls == ID_MIX_LINK) {
+  } else if (cls == ID_MIX_LINK) {
     bool linked = panelMixers->btnLink[ch]->GetValue();
+    hid->settings[0x9100 + ch] = linked ? 1 : 0;
     if (linked) {
-      int32_t lVal = panelMixers->slVolL[ch] ? panelMixers->slVolL[ch]->GetValue() : 0;
-      if (panelMixers->slVol[ch]) panelMixers->slVol[ch]->SetValue(lVal);
-      if (panelMixers->ckMute[ch] && panelMixers->ckMuteL[ch]) panelMixers->ckMute[ch]->SetValue(panelMixers->ckMuteL[ch]->GetValue());
-      if (panelMixers->ckSolo[ch] && panelMixers->ckSoloL[ch]) panelMixers->ckSolo[ch]->SetValue(panelMixers->ckSoloL[ch]->GetValue());
-      if (panelMixers->ckPhaseCombined[ch] && panelMixers->ckPhase[ch*2]) panelMixers->ckPhaseCombined[ch]->SetValue(panelMixers->ckPhase[ch*2]->GetValue());
+      int32_t lVal =
+          panelMixers->slVolL[ch] ? panelMixers->slVolL[ch]->GetValue() : 0;
+      if (panelMixers->slVol[ch])
+        panelMixers->slVol[ch]->SetValue(lVal);
+      if (panelMixers->ckMute[ch] && panelMixers->ckMuteL[ch])
+        panelMixers->ckMute[ch]->SetValue(panelMixers->ckMuteL[ch]->GetValue());
+      if (panelMixers->ckSolo[ch] && panelMixers->ckSoloL[ch])
+        panelMixers->ckSolo[ch]->SetValue(panelMixers->ckSoloL[ch]->GetValue());
+      if (panelMixers->ckPhaseCombined[ch] && panelMixers->ckPhase[ch * 2])
+        panelMixers->ckPhaseCombined[ch]->SetValue(
+            panelMixers->ckPhase[ch * 2]->GetValue());
     } else {
-      int32_t combVal = panelMixers->slVol[ch] ? panelMixers->slVol[ch]->GetValue() : 0;
-      bool combMute = panelMixers->ckMute[ch] ? panelMixers->ckMute[ch]->GetValue() : false;
-      bool combSolo = panelMixers->ckSolo[ch] ? panelMixers->ckSolo[ch]->GetValue() : false;
-      bool combPhase = panelMixers->ckPhaseCombined[ch] ? panelMixers->ckPhaseCombined[ch]->GetValue() : false;
+      int32_t combVal =
+          panelMixers->slVol[ch] ? panelMixers->slVol[ch]->GetValue() : 0;
+      bool combMute =
+          panelMixers->ckMute[ch] ? panelMixers->ckMute[ch]->GetValue() : false;
+      bool combSolo =
+          panelMixers->ckSolo[ch] ? panelMixers->ckSolo[ch]->GetValue() : false;
+      bool combPhase = panelMixers->ckPhaseCombined[ch]
+                           ? panelMixers->ckPhaseCombined[ch]->GetValue()
+                           : false;
 
-      if (panelMixers->slVolL[ch]) panelMixers->slVolL[ch]->SetValue(combVal);
-      if (panelMixers->slVolR[ch]) panelMixers->slVolR[ch]->SetValue(combVal);
-      if (panelMixers->ckMuteL[ch]) panelMixers->ckMuteL[ch]->SetValue(combMute);
-      if (panelMixers->ckMuteR[ch]) panelMixers->ckMuteR[ch]->SetValue(combMute);
-      if (panelMixers->ckSoloL[ch]) panelMixers->ckSoloL[ch]->SetValue(combSolo);
-      if (panelMixers->ckSoloR[ch]) panelMixers->ckSoloR[ch]->SetValue(combSolo);
-      if (panelMixers->ckPhase[ch*2]) panelMixers->ckPhase[ch*2]->SetValue(combPhase);
-      if (panelMixers->ckPhase[ch*2+1]) panelMixers->ckPhase[ch*2+1]->SetValue(combPhase);
+      if (panelMixers->slVolL[ch])
+        panelMixers->slVolL[ch]->SetValue(combVal);
+      if (panelMixers->slVolR[ch])
+        panelMixers->slVolR[ch]->SetValue(combVal);
+      if (panelMixers->ckMuteL[ch])
+        panelMixers->ckMuteL[ch]->SetValue(combMute);
+      if (panelMixers->ckMuteR[ch])
+        panelMixers->ckMuteR[ch]->SetValue(combMute);
+      if (panelMixers->ckSoloL[ch])
+        panelMixers->ckSoloL[ch]->SetValue(combSolo);
+      if (panelMixers->ckSoloR[ch])
+        panelMixers->ckSoloR[ch]->SetValue(combSolo);
+      if (panelMixers->ckPhase[ch * 2])
+        panelMixers->ckPhase[ch * 2]->SetValue(combPhase);
+      if (panelMixers->ckPhase[ch * 2 + 1])
+        panelMixers->ckPhase[ch * 2 + 1]->SetValue(combPhase);
     }
-    if (panelMixers->slVol[ch]) panelMixers->slVol[ch]->Show(linked);
-    if (panelMixers->slVolL[ch]) panelMixers->slVolL[ch]->Show(!linked);
-    if (panelMixers->slVolR[ch]) panelMixers->slVolR[ch]->Show(!linked);
-    
-    if (panelMixers->combBtnSizer[ch]) panelMixers->combBtnSizer[ch]->Show(linked);
-    if (panelMixers->splitBtnSizer[ch]) panelMixers->splitBtnSizer[ch]->Show(!linked);
+    if (panelMixers->slVol[ch])
+      panelMixers->slVol[ch]->Show(linked);
+    if (panelMixers->slVolL[ch])
+      panelMixers->slVolL[ch]->Show(!linked);
+    if (panelMixers->slVolR[ch])
+      panelMixers->slVolR[ch]->Show(!linked);
+
+    if (panelMixers->combBtnSizer[ch])
+      panelMixers->combBtnSizer[ch]->Show(linked);
+    if (panelMixers->splitBtnSizer[ch])
+      panelMixers->splitBtnSizer[ch]->Show(!linked);
 
     panelMixers->Layout();
     this->OnMixVolumeChanged(ch);
-  }
-  else if (cls == ID_LOOP_LINK) {
+  } else if (cls == ID_LOOP_LINK) {
     bool linked = panelLoopbacks->btnLink[ch]->GetValue();
+    hid->settings[0x9200 + ch] = linked ? 1 : 0;
     if (linked) {
-      int32_t lVal = panelLoopbacks->slOutputL[ch] ? panelLoopbacks->slOutputL[ch]->GetValue() : 0;
-      if (panelLoopbacks->slOutput[ch]) panelLoopbacks->slOutput[ch]->SetValue(lVal);
-      if (panelLoopbacks->ckMute[ch] && panelLoopbacks->ckMuteL[ch]) panelLoopbacks->ckMute[ch]->SetValue(panelLoopbacks->ckMuteL[ch]->GetValue());
+      int32_t lVal = panelLoopbacks->slOutputL[ch]
+                         ? panelLoopbacks->slOutputL[ch]->GetValue()
+                         : 0;
+      if (panelLoopbacks->slOutput[ch])
+        panelLoopbacks->slOutput[ch]->SetValue(lVal);
+      if (panelLoopbacks->ckMute[ch] && panelLoopbacks->ckMuteL[ch])
+        panelLoopbacks->ckMute[ch]->SetValue(
+            panelLoopbacks->ckMuteL[ch]->GetValue());
     } else {
-      int32_t combVal = panelLoopbacks->slOutput[ch] ? panelLoopbacks->slOutput[ch]->GetValue() : 0;
-      bool combMute = panelLoopbacks->ckMute[ch] ? panelLoopbacks->ckMute[ch]->GetValue() : false;
-      if (panelLoopbacks->slOutputL[ch]) panelLoopbacks->slOutputL[ch]->SetValue(combVal);
-      if (panelLoopbacks->slOutputR[ch]) panelLoopbacks->slOutputR[ch]->SetValue(combVal);
-      if (panelLoopbacks->ckMuteL[ch]) panelLoopbacks->ckMuteL[ch]->SetValue(combMute);
-      if (panelLoopbacks->ckMuteR[ch]) panelLoopbacks->ckMuteR[ch]->SetValue(combMute);
+      int32_t combVal = panelLoopbacks->slOutput[ch]
+                            ? panelLoopbacks->slOutput[ch]->GetValue()
+                            : 0;
+      bool combMute = panelLoopbacks->ckMute[ch]
+                          ? panelLoopbacks->ckMute[ch]->GetValue()
+                          : false;
+      if (panelLoopbacks->slOutputL[ch])
+        panelLoopbacks->slOutputL[ch]->SetValue(combVal);
+      if (panelLoopbacks->slOutputR[ch])
+        panelLoopbacks->slOutputR[ch]->SetValue(combVal);
+      if (panelLoopbacks->ckMuteL[ch])
+        panelLoopbacks->ckMuteL[ch]->SetValue(combMute);
+      if (panelLoopbacks->ckMuteR[ch])
+        panelLoopbacks->ckMuteR[ch]->SetValue(combMute);
     }
-    if (panelLoopbacks->slOutput[ch]) panelLoopbacks->slOutput[ch]->Show(linked);
-    if (panelLoopbacks->slOutputL[ch]) panelLoopbacks->slOutputL[ch]->Show(!linked);
-    if (panelLoopbacks->slOutputR[ch]) panelLoopbacks->slOutputR[ch]->Show(!linked);
-    
-    if (panelLoopbacks->combBtnSizer[ch]) panelLoopbacks->combBtnSizer[ch]->Show(linked);
-    if (panelLoopbacks->splitBtnSizer[ch]) panelLoopbacks->splitBtnSizer[ch]->Show(!linked);
+    if (panelLoopbacks->slOutput[ch])
+      panelLoopbacks->slOutput[ch]->Show(linked);
+    if (panelLoopbacks->slOutputL[ch])
+      panelLoopbacks->slOutputL[ch]->Show(!linked);
+    if (panelLoopbacks->slOutputR[ch])
+      panelLoopbacks->slOutputR[ch]->Show(!linked);
+
+    if (panelLoopbacks->combBtnSizer[ch])
+      panelLoopbacks->combBtnSizer[ch]->Show(linked);
+    if (panelLoopbacks->splitBtnSizer[ch])
+      panelLoopbacks->splitBtnSizer[ch]->Show(!linked);
 
     panelLoopbacks->Layout();
     setLoopVol(ch);
-  }
-  else if (cls == ID_OUTPUT_LINK) {
+  } else if (cls == ID_OUTPUT_LINK) {
     bool linked = panelOutputs->btnLink[ch]->GetValue();
+    hid->settings[0x9300 + ch] = linked ? 1 : 0;
     if (linked) {
-      int32_t lVal = panelOutputs->slOutputL[ch] ? panelOutputs->slOutputL[ch]->GetValue() : 0;
-      if (panelOutputs->slOutput[ch]) panelOutputs->slOutput[ch]->SetValue(lVal);
-      if (ch > 0 && panelOutputs->ckMute[ch] && panelOutputs->ckMuteL[ch]) panelOutputs->ckMute[ch]->SetValue(panelOutputs->ckMuteL[ch]->GetValue());
+      int32_t lVal = panelOutputs->slOutputL[ch]
+                         ? panelOutputs->slOutputL[ch]->GetValue()
+                         : 0;
+      if (panelOutputs->slOutput[ch])
+        panelOutputs->slOutput[ch]->SetValue(lVal);
+      if (ch > 0 && panelOutputs->ckMute[ch] && panelOutputs->ckMuteL[ch])
+        panelOutputs->ckMute[ch]->SetValue(
+            panelOutputs->ckMuteL[ch]->GetValue());
     } else {
-      int32_t combVal = panelOutputs->slOutput[ch] ? panelOutputs->slOutput[ch]->GetValue() : 0;
-      bool combMute = (ch > 0 && panelOutputs->ckMute[ch]) ? panelOutputs->ckMute[ch]->GetValue() : false;
-      if (panelOutputs->slOutputL[ch]) panelOutputs->slOutputL[ch]->SetValue(combVal);
-      if (panelOutputs->slOutputR[ch]) panelOutputs->slOutputR[ch]->SetValue(combVal);
+      int32_t combVal = panelOutputs->slOutput[ch]
+                            ? panelOutputs->slOutput[ch]->GetValue()
+                            : 0;
+      bool combMute = (ch > 0 && panelOutputs->ckMute[ch])
+                          ? panelOutputs->ckMute[ch]->GetValue()
+                          : false;
+      if (panelOutputs->slOutputL[ch])
+        panelOutputs->slOutputL[ch]->SetValue(combVal);
+      if (panelOutputs->slOutputR[ch])
+        panelOutputs->slOutputR[ch]->SetValue(combVal);
       if (ch > 0) {
-        if (panelOutputs->ckMuteL[ch]) panelOutputs->ckMuteL[ch]->SetValue(combMute);
-        if (panelOutputs->ckMuteR[ch]) panelOutputs->ckMuteR[ch]->SetValue(combMute);
+        if (panelOutputs->ckMuteL[ch])
+          panelOutputs->ckMuteL[ch]->SetValue(combMute);
+        if (panelOutputs->ckMuteR[ch])
+          panelOutputs->ckMuteR[ch]->SetValue(combMute);
       }
     }
-    if (panelOutputs->slOutput[ch]) panelOutputs->slOutput[ch]->Show(linked);
-    if (panelOutputs->slOutputL[ch]) panelOutputs->slOutputL[ch]->Show(!linked);
-    if (panelOutputs->slOutputR[ch]) panelOutputs->slOutputR[ch]->Show(!linked);
-    
+    if (panelOutputs->slOutput[ch])
+      panelOutputs->slOutput[ch]->Show(linked);
+    if (panelOutputs->slOutputL[ch])
+      panelOutputs->slOutputL[ch]->Show(!linked);
+    if (panelOutputs->slOutputR[ch])
+      panelOutputs->slOutputR[ch]->Show(!linked);
+
     if (ch > 0) {
-      if (panelOutputs->combBtnSizer[ch]) panelOutputs->combBtnSizer[ch]->Show(linked);
-      if (panelOutputs->splitBtnSizer[ch]) panelOutputs->splitBtnSizer[ch]->Show(!linked);
+      if (panelOutputs->combBtnSizer[ch])
+        panelOutputs->combBtnSizer[ch]->Show(linked);
+      if (panelOutputs->splitBtnSizer[ch])
+        panelOutputs->splitBtnSizer[ch]->Show(!linked);
     }
 
     panelOutputs->Layout();
@@ -3953,6 +4793,8 @@ void TPMixer::OnLinkToggle(wxCommandEvent &event) {
 class MyApp : public wxApp {
 public:
   bool OnInit() override {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     wxInitAllImageHandlers();
     TPMixer *frame = new TPMixer();
     frame->Show(true);
