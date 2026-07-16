@@ -3330,6 +3330,7 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
 
   switch (cls) {
   case 0x10:
+    hid->settings[ch16] = val;
     break;
   case 0x20: {
     int32_t logicCh = ch - 0x21;
