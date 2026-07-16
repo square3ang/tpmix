@@ -64,6 +64,7 @@ uint32_t read32BE(uint8_t *buf) {
 }
 
 double g_uiScale = 1.0;
+void ScaleUIElements(wxWindow *win, double scale);
 
 // Gain calculation class
 class Gain {
@@ -1393,7 +1394,7 @@ class SettingsDialog : public wxDialog {
 public:
   SettingsDialog(wxWindow *parent, uint16_t pid, ToppingHID *hid)
       : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition,
-                 wxSize(450, 350), wxDEFAULT_DIALOG_STYLE),
+                 wxDefaultSize, wxDEFAULT_DIALOG_STYLE),
         m_hid(hid) {
     SetBackgroundColour(wxColour(30, 30, 30));
     SetForegroundColour(wxColour(220, 220, 220));
@@ -1502,55 +1503,6 @@ public:
     colsSizer->Add(rightCol, 1, wxALL | wxEXPAND, 8);
     mainSizer->Add(colsSizer, 0, wxEXPAND);
 
-    mainSizer->Add(new wxStaticLine(this, wxID_ANY), 0,
-                   wxEXPAND | wxLEFT | wxRIGHT, 10);
-
-    // Version details
-    wxBoxSizer *verSizer = new wxBoxSizer(wxVERTICAL);
-    wxStaticText *lblVerTitle =
-        new wxStaticText(this, wxID_ANY, "Version information");
-    lblVerTitle->SetFont(lblVerTitle->GetFont().Bold());
-    verSizer->Add(lblVerTitle, 0, wxALL, 4);
-
-    wxString deviceName = "E2x2 OTG";
-    if (pid == 0x8754)
-      deviceName = "E4x4";
-    else if (pid == 0x8755)
-      deviceName = "E1x2 OTG";
-    else if (pid == 0x8752)
-      deviceName = "E2x2";
-
-    verSizer->Add(
-        new wxStaticText(this, wxID_ANY, "Device model: " + deviceName), 0,
-        wxLEFT | wxBOTTOM, 2);
-    verSizer->Add(
-        new wxStaticText(this, wxID_ANY, "Device hardware version: V1.01"), 0,
-        wxLEFT | wxBOTTOM, 2);
-    verSizer->Add(
-        new wxStaticText(this, wxID_ANY, "Device software version: V1.07"), 0,
-        wxLEFT | wxBOTTOM, 2);
-    verSizer->Add(new wxStaticText(this, wxID_ANY,
-                                   "TOPPING Control Center version: V1.08"),
-                  0, wxLEFT | wxBOTTOM, 4);
-
-    wxBoxSizer *btnSizer = new wxBoxSizer(wxHORIZONTAL);
-    wxButton *btnCheck =
-        new wxButton(this, wxID_ANY, "Check for updates", wxDefaultPosition,
-                     wxDefaultSize, wxBORDER_NONE);
-    btnCheck->SetBackgroundColour(wxColour(50, 50, 50));
-    btnCheck->SetForegroundColour(*wxWHITE);
-    wxButton *btnWeb =
-        new wxButton(this, wxID_ANY, "Official website", wxDefaultPosition,
-                     wxDefaultSize, wxBORDER_NONE);
-    btnWeb->SetBackgroundColour(wxColour(50, 50, 50));
-    btnWeb->SetForegroundColour(*wxWHITE);
-
-    btnSizer->Add(btnCheck, 0, wxRIGHT, 8);
-    btnSizer->Add(btnWeb, 0);
-    verSizer->Add(btnSizer, 0, wxLEFT | wxTOP, 3);
-
-    mainSizer->Add(verSizer, 1, wxALL | wxEXPAND, 8);
-
     wxBoxSizer *okCancelSizer = new wxBoxSizer(wxHORIZONTAL);
     wxButton *btnOK = new wxButton(this, wxID_OK, "OK");
     okCancelSizer->Add(btnOK, 0, wxALL, 8);
@@ -1558,6 +1510,7 @@ public:
 
     SetSizer(mainSizer);
     Layout();
+    Fit();
 
     choiceBrightness->Bind(wxEVT_CHOICE, &SettingsDialog::OnDeviceChange, this);
     cbAutoStandby->Bind(wxEVT_CHECKBOX, &SettingsDialog::OnDeviceChange, this);
@@ -2953,6 +2906,8 @@ protected:
 
   void OnSettings(wxCommandEvent &event) {
     SettingsDialog dlg(this, hid->pid, hid);
+    ScaleUIElements(&dlg, g_uiScale);
+    dlg.Fit();
     dlg.ShowModal();
   }
 
