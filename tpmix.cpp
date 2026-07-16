@@ -158,18 +158,26 @@ public:
     prepareBuf();
   };
 
-  void initializeSettingsWithDefaults() {
+  void initializeSettingsWithDefaults(bool force = false) {
     // 1. Inputs (ch 0..3)
     for (int i = 0; i < 4; ++i) {
       uint16_t base = 0x2100 + (i << 8);
-      if (!settings.contains(base + 1))
+      if (force || !settings.contains(base + 1))
         settings[base + 1] = 0; // MON
-      if (!settings.contains(base + 2))
+      if (force || !settings.contains(base + 2))
         settings[base + 2] = 0; // 48V
-      if (!settings.contains(base + 3))
+      if (force || !settings.contains(base + 3))
         settings[base + 3] = 0; // INST
-      if (!settings.contains(base + 5))
+      if (force || !settings.contains(base + 5))
         settings[base + 5] = 0x02000000; // Gain (0 dB)
+      if (force || !settings.contains(base + 6))
+        settings[base + 6] = 0; // MUTE (Off)
+      if (force || !settings.contains(base + 7))
+        settings[base + 7] = 0; // SOLO (Off)
+      if (force || !settings.contains(base + 8))
+        settings[base + 8] = 0; // PHASE (Off)
+      if (force || !settings.contains(base + 9))
+        settings[base + 9] = 0; // LOOP Gain
     }
 
     // 2. Mixers (bus 0..3, src 0..11)
@@ -179,9 +187,9 @@ public:
         uint16_t keyR = ((0x62 + bus * 2) << 8) | (src + 1);
         int32_t defaultL = (src % 2 == 0) ? 0x02000000 : 0;
         int32_t defaultR = (src % 2 == 1) ? 0x02000000 : 0;
-        if (!settings.contains(keyL))
+        if (force || !settings.contains(keyL))
           settings[keyL] = defaultL;
-        if (!settings.contains(keyR))
+        if (force || !settings.contains(keyR))
           settings[keyR] = defaultR;
       }
     }
@@ -189,57 +197,57 @@ public:
     // 3. Loopbacks (ch 0..5)
     for (int i = 0; i < 6; ++i) {
       uint16_t key = ((0x51 + i) << 8) | 3;
-      if (!settings.contains(key))
+      if (force || !settings.contains(key))
         settings[key] = 0x02000000; // Loopback Vol (0 dB)
     }
     // Loopback source select
     for (int i = 0; i < 3; ++i) {
       uint16_t key = ((0x57 + i) << 8) | 1;
-      if (!settings.contains(key))
+      if (force || !settings.contains(key))
         settings[key] = 1;
     }
 
     // 4. Outputs (ch 0..3)
     for (int i = 0; i < 4; ++i) {
       uint16_t key = ((0x31 + i) << 8) | 3;
-      if (!settings.contains(key))
+      if (force || !settings.contains(key))
         settings[key] = 0x02000000; // Output Vol (0 dB)
     }
     // Output select for phones (ch 4..5)
     uint8_t phoneBase = phoneRegOffset();
     for (int i = 0; i < 2; ++i) {
       uint16_t key = ((phoneBase + i) << 8) | 1;
-      if (!settings.contains(key))
+      if (force || !settings.contains(key))
         settings[key] = 7; // Default source 7 (Playback 1+2)
 
       uint16_t keyGain = ((phoneBase + i) << 8) | 2;
-      if (!settings.contains(keyGain))
+      if (force || !settings.contains(keyGain))
         settings[keyGain] = 0; // Phone gain boost off
 
       uint16_t keyMix = ((phoneBase + i) << 8) | 3;
-      if (!settings.contains(keyMix))
+      if (force || !settings.contains(keyMix))
         settings[keyMix] = 50; // Default Monitor Mix: 50 (Center, 0 dB)
     }
 
     // 5. Device Settings
-    if (!settings.contains(0x3701))
+    if (force || !settings.contains(0x3701))
       settings[0x3701] = 1; // Phone 1 default: ON
-    if (!settings.contains(0x3702))
+    if (force || !settings.contains(0x3702))
       settings[0x3702] = 1; // Phone 2 default: ON
-    if (!settings.contains(0x3703))
+    if (force || !settings.contains(0x3703))
       settings[0x3703] = 1; // TRS default: ON
-    if (!settings.contains(0x3704))
+    if (force || !settings.contains(0x3704))
       settings[0x3704] = 1; // AUX default: ON
 
-    if (!settings.contains(0x3901))
+    if (force || !settings.contains(0x3901))
       settings[0x3901] = 1; // Auto Standby default: ON
-    if (!settings.contains(0x1101))
+    if (force || !settings.contains(0x1101))
       settings[0x1101] = 1; // Auto Standby default: ON for non-E4X4
-    if (!settings.contains(0x3a01))
-      settings[0x3a01] = 1; // OTG Mode default: ON
-    if (!settings.contains(0x1103))
-      settings[0x1103] = 1; // OTG Mode default: ON for non-E4X4
-    if (!settings.contains(0x1104))
+    if (force || !settings.contains(0x3a01))
+      settings[0x3a01] = 0; // OTG Mode default: OFF
+    if (force || !settings.contains(0x1103))
+      settings[0x1103] = 0; // OTG Mode default: OFF for non-E4X4
+    if (force || !settings.contains(0x1104))
       settings[0x1104] = 1; // LED Brightness default: Medium (1)
 
     // 6. GUI Link Settings (default values)
@@ -356,18 +364,7 @@ public:
     write32BE(&buf[7], 1);
     enqueue(true, false);
   };
-  void requestDeviceDump() {
-    if (pid == 0x8754) {
-      buf[5] = 0x11;
-      buf[6] = 0x05;
-      write32BE(&buf[7], 1);
-    } else {
-      buf[5] = 0x20;
-      buf[6] = 0x05;
-      write32BE(&buf[7], 0x02000000);
-    }
-    enqueue(true, false);
-  };
+
   void setDeviceSetting(uint8_t zone, uint8_t ctrl, int32_t value,
                         bool exec = true) {
     buf[5] = zone;
@@ -440,6 +437,7 @@ enum {
   ID_SAVE = 0x0010,
   ID_LOAD = 0x0001,
   ID_DEVICE_SAVE = 0x0020,
+  ID_RESET_DEFAULTS = 0x9990,
 
   ID_INPUT_GAIN = 0x220,
   ID_INPUT_48V = 0x240,
@@ -1480,13 +1478,13 @@ public:
     if (isOTG) {
       cbOTGMode = new wxCheckBox(this, wxID_ANY, "Mobile applications");
       int otgVal =
-          m_hid->settings.contains(0x1103) ? m_hid->settings[0x1103] : 1;
+          m_hid->settings.contains(0x1103) ? m_hid->settings[0x1103] : 0;
       cbOTGMode->SetValue(otgVal ? true : false);
       rightCol->Add(cbOTGMode, 0, wxALL, 5);
     } else if (pid == 0x8754) {
       cbOTGMode = new wxCheckBox(this, wxID_ANY, "Mobile applications");
       int otgVal =
-          m_hid->settings.contains(0x3a01) ? m_hid->settings[0x3a01] : 1;
+          m_hid->settings.contains(0x3a01) ? m_hid->settings[0x3a01] : 0;
       cbOTGMode->SetValue(otgVal ? true : false);
       rightCol->Add(cbOTGMode, 0, wxALL, 5);
     } else {
@@ -1497,6 +1495,8 @@ public:
     mainSizer->Add(colsSizer, 0, wxEXPAND);
 
     wxBoxSizer *okCancelSizer = new wxBoxSizer(wxHORIZONTAL);
+    wxButton *btnReset = new wxButton(this, wxID_ANY, "Reset Defaults");
+    okCancelSizer->Add(btnReset, 0, wxALL, 8);
     wxButton *btnOK = new wxButton(this, wxID_OK, "OK");
     okCancelSizer->Add(btnOK, 0, wxALL, 8);
     mainSizer->Add(okCancelSizer, 0, wxALIGN_RIGHT);
@@ -1512,6 +1512,33 @@ public:
     }
     cbSaveWorkspace->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &evt) {
       m_hid->settings[0x9001] = cbSaveWorkspace->GetValue() ? 1 : 0;
+    });
+    btnReset->Bind(wxEVT_BUTTON, [this](wxCommandEvent &evt) {
+      m_hid->initializeSettingsWithDefaults(true);
+      cbSaveWorkspace->SetValue(true);
+      m_hid->settings[0x9001] = 1;
+
+      choiceBrightness->SetSelection(1);
+      m_hid->setDeviceSetting(0x11, 0x04, 1);
+      m_hid->settings[0x1104] = 1;
+
+      int standbyReg = (m_hid->pid == 0x8754) ? 0x3901 : 0x1101;
+      m_hid->setDeviceSetting(standbyReg >> 8, standbyReg & 0xff, 1);
+      m_hid->settings[standbyReg] = 1;
+      cbAutoStandby->SetValue(true);
+
+      if (cbOTGMode) {
+        int otgReg = (m_hid->pid == 0x8754) ? 0x3a01 : 0x1103;
+        m_hid->setDeviceSetting(otgReg >> 8, otgReg & 0xff, 0);
+        m_hid->settings[otgReg] = 0;
+        cbOTGMode->SetValue(false);
+      }
+
+      wxCommandEvent resetEvt(wxEVT_BUTTON, ID_RESET_DEFAULTS);
+      GetParent()->GetEventHandler()->AddPendingEvent(resetEvt);
+
+      wxMessageBox("Settings reset to defaults and applied to device!",
+                   "Reset Success", wxOK | wxICON_INFORMATION, this);
     });
   }
 
@@ -2816,6 +2843,9 @@ protected:
     if (ch < 0) {
       begin = 0;
       end = panelInputs->N_INPUTS;
+    } else if (ch == 2 && linked) {
+      begin = 2;
+      end = 4;
     }
 
     for (int32_t i = begin; i < end; i++) {
@@ -2893,7 +2923,9 @@ protected:
   }
 
   void saveSettings();
-  void loadSettings();
+  void pushAllSettingsToDevice();
+  bool loadSettings();
+  void refreshInputsUi();
   void refreshMixerUi(int16_t bus = -1);
   void refreshLoopbackUi();
   void refreshOutputUi();
@@ -2901,6 +2933,7 @@ protected:
   void OnLoad(wxCommandEvent &event);
   void OnSave(wxCommandEvent &event);
   void OnDeviceSave(wxCommandEvent &event);
+  void OnResetDefaults(wxCommandEvent &event);
 
   void OnSettings(wxCommandEvent &event) {
     SettingsDialog dlg(this, hid->pid, hid);
@@ -3045,6 +3078,7 @@ TPMixer::TPMixer()
   btnSettings->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnSettings, this);
   btnSave->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnSave, this);
   btnLoad->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLoad, this);
+  Bind(wxEVT_BUTTON, &TPMixer::OnResetDefaults, this, ID_RESET_DEFAULTS);
 
   int numCols = (hid->pid == 0x8754)
                     ? 3
@@ -3311,10 +3345,22 @@ TPMixer::TPMixer()
   }
 
   loadSettings();
+  refreshInputsUi();
+  refreshMixerUi(-1);
+  refreshLoopbackUi();
+  refreshOutputUi();
+  if (panelInputs)
+    panelInputs->Layout();
+  if (panelOutputs)
+    panelOutputs->Layout();
+  if (panelLoopbacks)
+    panelLoopbacks->Layout();
+  Layout();
+
   startHidReader();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   if (NULL != hid->getHandle()) {
-    hid->requestDeviceDump();
+    pushGuiStateToDevice();
   }
 }
 
@@ -3328,9 +3374,23 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
   int32_t level01DB = val;
   int32_t cls = ch & 0xf0;
 
+  bool isLevelMeter = false;
+  if (cls == 0x40) {
+    isLevelMeter = true;
+  } else if (cls == 0x20 && subCh == 0x04) {
+    isLevelMeter = true;
+  } else if (cls == 0x30 && (ch - 0x31) < 6 && subCh == 0x01) {
+    isLevelMeter = true;
+  } else if (cls == 0x50 && subCh == 0x01) {
+    isLevelMeter = true;
+  }
+
+  if (!isLevelMeter) {
+    hid->settings[ch16] = val;
+  }
+
   switch (cls) {
   case 0x10:
-    hid->settings[ch16] = val;
     break;
   case 0x20: {
     int32_t logicCh = ch - 0x21;
@@ -3840,7 +3900,7 @@ void TPMixer::saveSettings() {
   }
 }
 
-void TPMixer::loadSettings() {
+bool TPMixer::loadSettings() {
   hid->initializeSettingsWithDefaults();
   FILE *f = fopen(fileCfg.c_str(), "r");
   uint16_t key = 0;
@@ -3883,53 +3943,225 @@ void TPMixer::loadSettings() {
     }
     // Always re-apply scale after loading so panel sizes initialize correctly
     CallAfter(&TPMixer::RescaleUI, g_uiScale);
+    return true;
   }
+  return false;
 }
 
 void TPMixer::pushGuiStateToDevice() {
   if (NULL == hid->getHandle())
     return;
 
-  int activeCols = (hid->pid == 0x8754)
-                       ? 3
-                       : ((hid->pid == 0x8752 || hid->pid == 0x8756) ? 2 : 1);
-  for (int col = 0; col < activeCols; ++col) {
-    if (col < 2) {
-      if (panelInputs->cbMon[col])
-        hid->setInputMon(col, panelInputs->cbMon[col]->GetValue());
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      if (panelInputs->cb48V[col])
-        hid->setInput48V(col, panelInputs->cb48V[col]->GetValue());
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      if (panelInputs->cbInst[col])
-        hid->setInputInst(col, panelInputs->cbInst[col]->GetValue());
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  // 1. Push Inputs: MON, 48V, INST, and Gain/Mute/Solo/Phase
+  for (int i = 0; i < hid->numInputs; ++i) {
+    if (i < 2) {
+      if (panelInputs->cbMon[i]) {
+        hid->setInputMon(i, panelInputs->cbMon[i]->GetValue());
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      if (panelInputs->cb48V[i]) {
+        hid->setInput48V(i, panelInputs->cb48V[i]->GetValue());
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      if (panelInputs->cbInst[i]) {
+        hid->setInputInst(i, panelInputs->cbInst[i]->GetValue());
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
     }
-    sendInput(col, true);
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    sendInput(i, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
 
+  // 2. Push Mixer volumes (Mix A, B, C, D) for all 12 channels
+  for (int bus = 0; bus < 4; ++bus) {
+    for (int src = 0; src < 12; ++src) {
+      uint16_t keyL = ((0x61 + bus * 2) << 8) | (src + 1);
+      uint16_t keyR = ((0x62 + bus * 2) << 8) | (src + 1);
+      if (hid->settings.contains(keyL) && hid->settings.contains(keyR)) {
+        int32_t gainL = hid->settings[keyL];
+        int32_t gainR = hid->settings[keyR];
+        hid->setMixVol(bus, src, gainL, gainR);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    }
+  }
+
+  // 3. Push Output Routing Selection and Volume
   int numOuts = (hid->pid == 0x8752)
                     ? 1
                     : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
   for (int i = 0; i < numOuts; ++i) {
-    int val = panelOutputs->cbSelect[i]->GetSelection();
-    hid->setOutputSel(i, val + 1);
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-
+    if (panelOutputs->cbSelect[i]) {
+      int val = panelOutputs->cbSelect[i]->GetSelection();
+      hid->setOutputSel(i, val + 1);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
     setOutputVol(i);
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
 
+  // 4. Push Phone/TRS/AUX enables (0x3701..0x3704)
+  if (hid->settings.contains(0x3701)) {
+    hid->setOutputMon(0, hid->settings[0x3701] != 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  if (hid->settings.contains(0x3702)) {
+    hid->setOutputMon(1, hid->settings[0x3702] != 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  if (hid->settings.contains(0x3703)) {
+    hid->setOutputLine(0, hid->settings[0x3703] != 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  if (hid->settings.contains(0x3704) && hid->pid != 0x8755 &&
+      hid->pid != 0x8752) {
+    hid->setOutputLine(1, hid->settings[0x3704] != 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
+  // 5. Push Phone Gain and Phone Mix
+  uint8_t phoneBase = hid->phoneRegOffset();
+  for (int i = 0; i < 2; ++i) {
+    uint16_t keyGain = ((phoneBase + i) << 8) | 2;
+    uint16_t keyMix = ((phoneBase + i) << 8) | 3;
+    if (hid->settings.contains(keyGain)) {
+      hid->setPhoneGainBoost(i, hid->settings[keyGain]);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (hid->settings.contains(keyMix)) {
+      hid->setPhoneMix(i, hid->settings[keyMix]);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  }
+
+  // 6. Push Loopback selection and levels
   for (int i = 0; i < panelLoopbacks->N_LOOPBACKS; ++i) {
     if (panelLoopbacks->cbSelect[i]) {
       int val = panelLoopbacks->cbSelect[i]->GetSelection();
       hid->setLoopSel(i, val + 1);
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      setLoopVol(i);
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    setLoopVol(i);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
+  // 7. Push Device Standby, OTG Mode, and LED Brightness Settings
+  if (hid->pid == 0x8754) {
+    if (hid->settings.contains(0x3901)) {
+      hid->setDeviceSetting(0x39, 0x01, hid->settings[0x3901]);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (hid->settings.contains(0x3a01)) {
+      hid->setDeviceSetting(0x3a, 0x01, hid->settings[0x3a01]);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  } else {
+    if (hid->settings.contains(0x1101)) {
+      hid->setDeviceSetting(0x11, 0x01, hid->settings[0x1101]);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (hid->settings.contains(0x1103)) {
+      hid->setDeviceSetting(0x11, 0x03, hid->settings[0x1103]);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
   }
+  if (hid->settings.contains(0x1104)) {
+    hid->setDeviceSetting(0x11, 0x04, hid->settings[0x1104]);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+}
+
+void TPMixer::refreshInputsUi() {
+  if (NULL == hid->getHandle())
+    return;
+
+  int numCols = (hid->pid == 0x8754)
+                    ? 3
+                    : ((hid->pid == 0x8752 || hid->pid == 0x8756) ? 2 : 1);
+
+  bool inputLinked =
+      (panelInputs->btnLink) ? panelInputs->btnLink->GetValue() : true;
+
+  for (int col = 0; col < numCols; ++col) {
+    int logicCh = col;
+    int colMap = (logicCh >= 2) ? 2 : logicCh;
+
+    uint16_t keyMon = 0x2101 + (logicCh << 8);
+    if (hid->settings.contains(keyMon)) {
+      int32_t val = hid->settings[keyMon];
+      if (panelInputs->cbMon[colMap]) {
+        panelInputs->cbMon[colMap]->SetValue(val ? true : false);
+      }
+    }
+
+    uint16_t key48V = 0x2102 + (logicCh << 8);
+    if (hid->settings.contains(key48V)) {
+      int32_t val = hid->settings[key48V];
+      if (panelInputs->cb48V[colMap]) {
+        panelInputs->cb48V[colMap]->SetValue(val ? true : false);
+      }
+    }
+
+    uint16_t keyInst = 0x2103 + (logicCh << 8);
+    if (hid->settings.contains(keyInst)) {
+      int32_t val = hid->settings[keyInst];
+      if (panelInputs->cbInst[colMap]) {
+        panelInputs->cbInst[colMap]->SetValue(val ? true : false);
+      }
+    }
+
+    uint16_t keyMute = 0x2106 + (logicCh << 8);
+    if (hid->settings.contains(keyMute)) {
+      int32_t val = hid->settings[keyMute];
+      if (panelInputs->cbMute[colMap]) {
+        panelInputs->cbMute[colMap]->SetValue(val ? true : false);
+      }
+    }
+
+    uint16_t keySolo = 0x2107 + (logicCh << 8);
+    if (hid->settings.contains(keySolo)) {
+      int32_t val = hid->settings[keySolo];
+      if (panelInputs->cbSolo[colMap]) {
+        panelInputs->cbSolo[colMap]->SetValue(val ? true : false);
+      }
+    }
+
+    uint16_t keyPhase = 0x2108 + (logicCh << 8);
+    if (hid->settings.contains(keyPhase)) {
+      int32_t val = hid->settings[keyPhase];
+      if (panelInputs->cbPhase[colMap]) {
+        panelInputs->cbPhase[colMap]->SetValue(val ? true : false);
+      }
+    }
+
+    uint16_t keyGain = 0x2109 + (logicCh << 8);
+    if (!hid->settings.contains(keyGain)) {
+      keyGain = 0x2105 + (logicCh << 8);
+    }
+    if (hid->settings.contains(keyGain)) {
+      int32_t val = hid->settings[keyGain];
+      if (colMap < 2) {
+        if (panelInputs->slGainI[colMap]) {
+          panelInputs->slGainI[colMap]->SetValue(val);
+        }
+      } else {
+        if (inputLinked) {
+          if (panelInputs->slGainICombined) {
+            panelInputs->slGainICombined->SetValue(val);
+          }
+        } else {
+          if (panelInputs->slGainI[logicCh]) {
+            panelInputs->slGainI[logicCh]->SetValue(val);
+          }
+        }
+      }
+      if (panelInputs->lbGainVal[colMap]) {
+        panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} dB", val));
+      }
+    }
+  }
+  if (panelInputs)
+    panelInputs->Layout();
 }
 
 void TPMixer::refreshMixerUi(int16_t bus) {
@@ -4180,15 +4412,18 @@ void TPMixer::refreshOutputUi() {
   }
 
   if (panelOutputs->btnPhoneIcon[0]) {
-    bool phoneVal = hid->settings.contains(0x3701) ? (hid->settings[0x3701] != 0) : true;
+    bool phoneVal =
+        hid->settings.contains(0x3701) ? (hid->settings[0x3701] != 0) : true;
     panelOutputs->btnPhoneIcon[0]->SetValue(phoneVal);
   }
   if (panelOutputs->btnTRS[0]) {
-    bool trsVal = hid->settings.contains(0x3703) ? (hid->settings[0x3703] != 0) : true;
+    bool trsVal =
+        hid->settings.contains(0x3703) ? (hid->settings[0x3703] != 0) : true;
     panelOutputs->btnTRS[0]->SetValue(trsVal);
   }
   if (panelOutputs->btnAUX[0]) {
-    bool auxVal = hid->settings.contains(0x3704) ? (hid->settings[0x3704] != 0) : true;
+    bool auxVal =
+        hid->settings.contains(0x3704) ? (hid->settings[0x3704] != 0) : true;
     panelOutputs->btnAUX[0]->SetValue(auxVal);
   }
 
@@ -4527,16 +4762,39 @@ void TPMixer::OnClose(wxCloseEvent &event) {
 }
 
 void TPMixer::OnLoad(wxCommandEvent &event) {
-  loadSettings();
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  if (NULL != hid->getHandle()) {
-    hid->requestDeviceDump();
+  if (loadSettings()) {
+    refreshInputsUi();
+    refreshMixerUi(-1);
+    refreshLoopbackUi();
+    refreshOutputUi();
+    if (NULL != hid->getHandle()) {
+      pushGuiStateToDevice();
+    }
   }
 }
 
 void TPMixer::OnSave(wxCommandEvent &event) { saveSettings(); }
 
 void TPMixer::OnDeviceSave(wxCommandEvent &event) { hid->saveDeviceDefault(); }
+
+void TPMixer::OnResetDefaults(wxCommandEvent &event) {
+  refreshInputsUi();
+  refreshMixerUi(-1);
+  refreshLoopbackUi();
+  refreshOutputUi();
+  if (panelInputs)
+    panelInputs->Layout();
+  if (panelOutputs)
+    panelOutputs->Layout();
+  if (panelLoopbacks)
+    panelLoopbacks->Layout();
+  Layout();
+
+  if (NULL != hid->getHandle()) {
+    pushGuiStateToDevice();
+  }
+  saveSettings();
+}
 
 void TPMixer::OnInputPeak(wxCommandEvent &event) {
   uint32_t id = event.GetId();
