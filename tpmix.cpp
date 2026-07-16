@@ -222,6 +222,15 @@ public:
     }
 
     // 5. Device Settings
+    if (!settings.contains(0x3701))
+      settings[0x3701] = 1; // Phone 1 default: ON
+    if (!settings.contains(0x3702))
+      settings[0x3702] = 1; // Phone 2 default: ON
+    if (!settings.contains(0x3703))
+      settings[0x3703] = 1; // TRS default: ON
+    if (!settings.contains(0x3704))
+      settings[0x3704] = 1; // AUX default: ON
+
     if (!settings.contains(0x3901))
       settings[0x3901] = 1; // Auto Standby default: ON
     if (!settings.contains(0x1101))
@@ -2482,8 +2491,11 @@ public:
         btnPhoneIcon[0] = new CustomButton(
             stripPanel, ID_OUTPUT_MON + 0, "", true, wxSize(14, 16),
             wxColour(29, 115, 201), ICON_HEADPHONE);
+        btnPhoneIcon[0]->SetValue(true);
+
         btnTRS[0] = new CustomButton(stripPanel, ID_OUTPUT_LINE + 0, "TRS",
                                      true, wxSize(14, 16));
+        btnTRS[0]->SetValue(true);
 
         btnRow->Add(btnPhoneIcon[0], 1, wxEXPAND | wxRIGHT, 1);
         btnRow->Add(btnTRS[0], 1, wxEXPAND | wxRIGHT, 1);
@@ -2491,6 +2503,7 @@ public:
         if (pid != 0x8755 && pid != 0x8752) {
           btnAUX[0] = new CustomButton(stripPanel, ID_OUTPUT_LINE + 1, "AUX",
                                        true, wxSize(14, 16));
+          btnAUX[0]->SetValue(true);
           btnRow->Add(btnAUX[0], 1, wxEXPAND);
         } else {
           btnAUX[0] = nullptr;
@@ -4164,6 +4177,20 @@ void TPMixer::refreshOutputUi() {
     }
     panelOutputs->updatePhoneMixLabel(panelOutputs->m_phoneMix[curPhone]);
   }
+
+  if (panelOutputs->btnPhoneIcon[0]) {
+    bool phoneVal = hid->settings.contains(0x3701) ? (hid->settings[0x3701] != 0) : true;
+    panelOutputs->btnPhoneIcon[0]->SetValue(phoneVal);
+  }
+  if (panelOutputs->btnTRS[0]) {
+    bool trsVal = hid->settings.contains(0x3703) ? (hid->settings[0x3703] != 0) : true;
+    panelOutputs->btnTRS[0]->SetValue(trsVal);
+  }
+  if (panelOutputs->btnAUX[0]) {
+    bool auxVal = hid->settings.contains(0x3704) ? (hid->settings[0x3704] != 0) : true;
+    panelOutputs->btnAUX[0]->SetValue(auxVal);
+  }
+
   panelOutputs->Layout();
 }
 
