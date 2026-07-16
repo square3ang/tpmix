@@ -237,6 +237,8 @@ public:
     // 6. GUI Link Settings (default values)
     if (!settings.contains(0x9000))
       settings[0x9000] = 1;
+    if (!settings.contains(0x9001))
+      settings[0x9001] = 1; // Auto save workspace default: ON
     for (int i = 0; i < 6; ++i) {
       if (!settings.contains(0x9100 + i)) {
         settings[0x9100 + i] =
@@ -1437,16 +1439,9 @@ public:
     leftCol->Add(dirSizer, 0, wxALL | wxEXPAND, 5);
 
     cbSaveWorkspace = new wxCheckBox(this, wxID_ANY, "Auto save workspace");
-    cbSaveWorkspace->SetValue(true);
+    bool saveWsVal = m_hid->settings.contains(0x9001) ? (m_hid->settings[0x9001] != 0) : true;
+    cbSaveWorkspace->SetValue(saveWsVal);
     leftCol->Add(cbSaveWorkspace, 0, wxALL, 5);
-
-    cbStartup = new wxCheckBox(this, wxID_ANY, "Auto run upon startup");
-    cbStartup->SetValue(true);
-    leftCol->Add(cbStartup, 0, wxALL, 5);
-
-    cbUpdates = new wxCheckBox(this, wxID_ANY, "Auto check updates");
-    cbUpdates->SetValue(true);
-    leftCol->Add(cbUpdates, 0, wxALL, 5);
 
     colsSizer->Add(leftCol, 1, wxALL | wxEXPAND, 8);
 
@@ -1569,6 +1564,9 @@ public:
     if (cbOTGMode) {
       cbOTGMode->Bind(wxEVT_CHECKBOX, &SettingsDialog::OnDeviceChange, this);
     }
+    cbSaveWorkspace->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &evt) {
+      m_hid->settings[0x9001] = cbSaveWorkspace->GetValue() ? 1 : 0;
+    });
   }
 
   wxCheckBox *cbAutoStandby;
@@ -1578,8 +1576,6 @@ public:
 private:
   ToppingHID *m_hid;
   wxCheckBox *cbSaveWorkspace;
-  wxCheckBox *cbStartup;
-  wxCheckBox *cbUpdates;
 
   void OnDeviceChange(wxCommandEvent &evt) {
     if (NULL == m_hid->getHandle())
@@ -4549,7 +4545,10 @@ void TPMixer::OnClose(wxCloseEvent &event) {
   delete thReader;
   thReader = nullptr;
 
-  saveSettings();
+  bool autoSave = hid->settings.contains(0x9001) ? (hid->settings[0x9001] != 0) : true;
+  if (autoSave) {
+    saveSettings();
+  }
   delete hid;
   hid = nullptr;
   delete gain;
