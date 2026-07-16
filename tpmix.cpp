@@ -239,8 +239,8 @@ public:
       settings[0x3a01] = 1; // OTG Mode default: ON
     if (!settings.contains(0x1103))
       settings[0x1103] = 1; // OTG Mode default: ON for non-E4X4
-    if (!settings.contains(0x100a))
-      settings[0x100a] = 1; // LED Brightness default: Medium (1)
+    if (!settings.contains(0x1104))
+      settings[0x1104] = 1; // LED Brightness default: Medium (1)
 
     // 6. GUI Link Settings (default values)
     if (!settings.contains(0x9000))
@@ -1459,7 +1459,7 @@ public:
     choiceBrightness->Append("High");
 
     int brightVal =
-        m_hid->settings.contains(0x100a) ? m_hid->settings[0x100a] : 1;
+        m_hid->settings.contains(0x1104) ? m_hid->settings[0x1104] : 1;
     choiceBrightness->SetSelection(std::clamp(brightVal, 0, 2));
     brightSizer->Add(choiceBrightness, 1, wxEXPAND);
     rightCol->Add(brightSizer, 0, wxALL | wxEXPAND, 5);
@@ -1529,8 +1529,8 @@ private:
 
     int sel = choiceBrightness->GetSelection();
     if (sel != wxNOT_FOUND) {
-      m_hid->setDeviceSetting(0x10, 0x0a, sel);
-      m_hid->settings[0x100a] = sel;
+      m_hid->setDeviceSetting(0x11, 0x04, sel);
+      m_hid->settings[0x1104] = sel;
     }
 
     bool val = cbAutoStandby->GetValue();
