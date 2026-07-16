@@ -228,8 +228,14 @@ public:
     // 5. Device Settings
     if (!settings.contains(0x3901))
       settings[0x3901] = 1; // Auto Standby default: ON
+    if (!settings.contains(0x1101))
+      settings[0x1101] = 1; // Auto Standby default: ON for non-E4X4
     if (!settings.contains(0x3a01))
       settings[0x3a01] = 1; // OTG Mode default: ON
+    if (!settings.contains(0x1103))
+      settings[0x1103] = 1; // OTG Mode default: ON for non-E4X4
+    if (!settings.contains(0x100a))
+      settings[0x100a] = 1; // LED Brightness default: Medium (1)
   }
 
   void readInfo() {
@@ -1231,6 +1237,7 @@ class PanelDevice : public wxPanel {
 public:
   wxCheckBox *cbAutoStandby;
   wxCheckBox *cbOTGMode;
+  wxChoice *choiceBrightness;
 
   PanelDevice(wxWindow *parent, uint16_t pid) : wxPanel(parent, wxID_ANY) {
     auto sizerMain = new wxBoxSizer(wxVERTICAL);
@@ -1245,12 +1252,24 @@ public:
     bool isOTG = (pid == 0x8755 || pid == 0x8756);
     if (isOTG) {
       cbOTGMode = new wxCheckBox(sizerGroup->GetStaticBox(), wxID_ANY,
-                                 "OTG Mode (Mobile Charging/Power)");
+                                 "Mobile applications");
       cbOTGMode->SetValue(true);
       sizerGroup->Add(cbOTGMode, 0, wxALL | wxEXPAND, 8);
     } else {
       cbOTGMode = nullptr;
     }
+
+    // LED Brightness
+    auto sizerBright = new wxBoxSizer(wxHORIZONTAL);
+    auto lblBright = new wxStaticText(sizerGroup->GetStaticBox(), wxID_ANY, "LED Brightness:");
+    choiceBrightness = new wxChoice(sizerGroup->GetStaticBox(), wxID_ANY);
+    choiceBrightness->Append("Low");
+    choiceBrightness->Append("Medium");
+    choiceBrightness->Append("High");
+    choiceBrightness->SetSelection(1); // Default Medium
+    sizerBright->Add(lblBright, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+    sizerBright->Add(choiceBrightness, 1, wxEXPAND);
+    sizerGroup->Add(sizerBright, 0, wxALL | wxEXPAND, 8);
 
     sizerMain->Add(sizerGroup, 0, wxEXPAND | wxALL, 15);
     SetSizer(sizerMain);
@@ -1507,6 +1526,7 @@ protected:
   void OnExit(wxCommandEvent &event);
   void OnAbout(wxCommandEvent &event);
   void OnDeviceToggle(wxCommandEvent &event);
+  void OnDeviceChoice(wxCommandEvent &event);
 
   void OnUpdateLevels(wxCommandEvent &evt);
   void OnClose(wxCloseEvent &event);
@@ -1875,6 +1895,26 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
   int32_t cls = ch & 0xf0;
   // printf("%d: %04x %08x\n", __LINE__, ch16, val);
   switch (cls) {
+  case 0x10:
+  {
+    if (ch == 0x11) {
+      if (subCh == 1) {
+        panelDevice->cbAutoStandby->SetValue(val ? true : false);
+        hid->settings[0x1101] = val;
+      } else if (subCh == 3) {
+        if (panelDevice->cbOTGMode) {
+          panelDevice->cbOTGMode->SetValue(val ? true : false);
+        }
+        hid->settings[0x1103] = val;
+      }
+    } else if (ch == 0x10 && subCh == 0x0a) {
+      if (val >= 0 && val <= 2) {
+        panelDevice->choiceBrightness->SetSelection(val);
+      }
+      hid->settings[0x100a] = val;
+    }
+    break;
+  }
   case 0x20: // input levels
   {
     int32_t logicCh = ch - 0x21;
@@ -2229,6 +2269,8 @@ TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "Topping E4X4 Mixer") {
     panelDevice->cbOTGMode->Bind(wxEVT_CHECKBOX, &TPMixer::OnDeviceToggle,
                                  this);
   }
+  panelDevice->choiceBrightness->Bind(wxEVT_CHOICE, &TPMixer::OnDeviceChoice,
+                                      this);
 
   // Dynamic Labels for Input 3+4
   // Dynamic Labels & Feature Hiding for Input 3+4 & Output/Phones
@@ -2442,12 +2484,26 @@ void TPMixer::pushGuiStateToDevice() {
 
   // 7. Push Device Settings
   int valStandby = panelDevice->cbAutoStandby->GetValue() ? 1 : 0;
-  hid->setDeviceSetting(0x39, 0x01, valStandby);
+  if (hid->pid == 0x8754) {
+    hid->setDeviceSetting(0x39, 0x01, valStandby);
+  } else {
+    hid->setDeviceSetting(0x11, 0x01, valStandby);
+  }
   std::this_thread::sleep_for(std::chrono::milliseconds(15));
 
   if (panelDevice->cbOTGMode) {
     int valOTG = panelDevice->cbOTGMode->GetValue() ? 1 : 0;
-    hid->setDeviceSetting(0x3a, 0x01, valOTG);
+    if (hid->pid == 0x8754) {
+      hid->setDeviceSetting(0x3a, 0x01, valOTG);
+    } else {
+      hid->setDeviceSetting(0x11, 0x03, valOTG);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  }
+
+  int valBright = panelDevice->choiceBrightness->GetSelection();
+  if (valBright != wxNOT_FOUND) {
+    hid->setDeviceSetting(0x10, 0x0a, valBright);
     std::this_thread::sleep_for(std::chrono::milliseconds(15));
   }
 }
@@ -2825,11 +2881,32 @@ void TPMixer::OnDeviceToggle(wxCommandEvent &event) {
   int32_t val32 = val ? 1 : 0;
 
   if (event.GetEventObject() == panelDevice->cbAutoStandby) {
-    hid->setDeviceSetting(0x39, 0x01, val32);
-    hid->settings[0x3901] = val32;
+    if (hid->pid == 0x8754) {
+      hid->setDeviceSetting(0x39, 0x01, val32);
+      hid->settings[0x3901] = val32;
+    } else {
+      hid->setDeviceSetting(0x11, 0x01, val32);
+      hid->settings[0x1101] = val32;
+    }
   } else if (panelDevice->cbOTGMode &&
              event.GetEventObject() == panelDevice->cbOTGMode) {
-    hid->setDeviceSetting(0x3a, 0x01, val32);
-    hid->settings[0x3a01] = val32;
+    if (hid->pid == 0x8754) {
+      hid->setDeviceSetting(0x3a, 0x01, val32);
+      hid->settings[0x3a01] = val32;
+    } else {
+      hid->setDeviceSetting(0x11, 0x03, val32);
+      hid->settings[0x1103] = val32;
+    }
+  }
+}
+
+void TPMixer::OnDeviceChoice(wxCommandEvent &event) {
+  if (NULL == hid->getHandle())
+    return;
+
+  int sel = panelDevice->choiceBrightness->GetSelection();
+  if (sel != wxNOT_FOUND) {
+    hid->setDeviceSetting(0x10, 0x0a, sel);
+    hid->settings[0x100a] = sel;
   }
 }
