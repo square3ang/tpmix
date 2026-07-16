@@ -2488,7 +2488,7 @@ public:
         btnRow->Add(btnPhoneIcon[0], 1, wxEXPAND | wxRIGHT, 1);
         btnRow->Add(btnTRS[0], 1, wxEXPAND | wxRIGHT, 1);
 
-        if (pid != 0x8755) {
+        if (pid != 0x8755 && pid != 0x8752) {
           btnAUX[0] = new CustomButton(stripPanel, ID_OUTPUT_LINE + 1, "AUX",
                                        true, wxSize(14, 16));
           btnRow->Add(btnAUX[0], 1, wxEXPAND);
