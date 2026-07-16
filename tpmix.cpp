@@ -134,9 +134,7 @@ public:
   uint16_t pid = 0x8754;
   int32_t numInputs = 4;
   std::map<uint16_t, int32_t> settings;
-  uint8_t phoneRegOffset() const {
-    return 0x35;
-  }
+  uint8_t phoneRegOffset() const { return 0x35; }
   ToppingHID() {
     uint16_t pids[] = {0x8755, 0x8756, 0x8752, 0x8754};
     for (uint16_t p : pids) {
@@ -605,8 +603,10 @@ private:
       }
       wxFont font = GetFont();
       double fontScale = 1.0 + (g_uiScale - 1.0) * 0.4;
-      if (fontScale < 0.8) fontScale = 0.8;
-      if (fontScale > 1.25) fontScale = 1.25;
+      if (fontScale < 0.8)
+        fontScale = 0.8;
+      if (fontScale > 1.25)
+        fontScale = 1.25;
 
       int ptSize = std::max(6, (int)(8 * fontScale));
       if (dy < 14.0 * g_uiScale)
@@ -1393,8 +1393,8 @@ private:
 class SettingsDialog : public wxDialog {
 public:
   SettingsDialog(wxWindow *parent, uint16_t pid, ToppingHID *hid)
-      : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition,
-                 wxDefaultSize, wxDEFAULT_DIALOG_STYLE),
+      : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxDefaultSize,
+                 wxDEFAULT_DIALOG_STYLE),
         m_hid(hid) {
     SetBackgroundColour(wxColour(30, 30, 30));
     SetForegroundColour(wxColour(220, 220, 220));
@@ -1409,24 +1409,6 @@ public:
     lblSysTitle->SetFont(lblSysTitle->GetFont().Bold().Larger());
     leftCol->Add(lblSysTitle, 0, wxALL, 5);
 
-    wxBoxSizer *langSizer = new wxBoxSizer(wxHORIZONTAL);
-    langSizer->Add(new wxStaticText(this, wxID_ANY, "Language:"), 0,
-                   wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-    wxChoice *choiceLang = new wxChoice(this, wxID_ANY);
-    choiceLang->Append("English");
-    choiceLang->SetSelection(0);
-    langSizer->Add(choiceLang, 1, wxEXPAND);
-    leftCol->Add(langSizer, 0, wxALL | wxEXPAND, 5);
-
-    wxBoxSizer *scaleSizer = new wxBoxSizer(wxHORIZONTAL);
-    scaleSizer->Add(new wxStaticText(this, wxID_ANY, "UI Scaling:"), 0,
-                    wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-    wxChoice *choiceScale = new wxChoice(this, wxID_ANY);
-    choiceScale->Append("100%");
-    choiceScale->SetSelection(0);
-    scaleSizer->Add(choiceScale, 1, wxEXPAND);
-    leftCol->Add(scaleSizer, 0, wxALL | wxEXPAND, 5);
-
     leftCol->Add(new wxStaticText(this, wxID_ANY, "Workspace storage:"), 0,
                  wxTOP | wxLEFT, 5);
     wxBoxSizer *dirSizer = new wxBoxSizer(wxHORIZONTAL);
@@ -1440,7 +1422,9 @@ public:
     leftCol->Add(dirSizer, 0, wxALL | wxEXPAND, 5);
 
     cbSaveWorkspace = new wxCheckBox(this, wxID_ANY, "Auto save workspace");
-    bool saveWsVal = m_hid->settings.contains(0x9001) ? (m_hid->settings[0x9001] != 0) : true;
+    bool saveWsVal = m_hid->settings.contains(0x9001)
+                         ? (m_hid->settings[0x9001] != 0)
+                         : true;
     cbSaveWorkspace->SetValue(saveWsVal);
     leftCol->Add(cbSaveWorkspace, 0, wxALL, 5);
 
@@ -2353,7 +2337,8 @@ public:
   wxStaticText *lblMixVal;
 
   void updatePhoneMixLabel(int val) {
-    if (!lblMixVal) return;
+    if (!lblMixVal)
+      return;
     int inputPct = 50 - val / 2;
     int playPct = 50 + val / 2;
     lblMixVal->SetLabel(std::format("Level: {}/{}", inputPct, playPct));
@@ -2965,8 +2950,8 @@ TPMixer::TPMixer()
   wxBoxSizer *mainSizer = new wxBoxSizer(wxVERTICAL);
 
   // 1. TOP HEADER PANEL
-  wxPanel *headerPanel =
-      new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, 32), 0, "headerPanel");
+  wxPanel *headerPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition,
+                                     wxSize(-1, 32), 0, "headerPanel");
   headerPanel->SetBackgroundColour(wxColour(44, 44, 44));
   headerPanel->Bind(wxEVT_PAINT, [headerPanel](wxPaintEvent &evt) {
     wxPaintDC dc(headerPanel);
@@ -3329,8 +3314,6 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
   uint8_t subCh = ch16 & 0xff;
   int32_t level01DB = val;
   int32_t cls = ch & 0xf0;
-
-
 
   switch (cls) {
   case 0x10:
@@ -3716,8 +3699,10 @@ void ScaleUIElements(wxWindow *win, double scale) {
     return;
 
   double fontScale = 1.0 + (scale - 1.0) * 0.4;
-  if (fontScale < 0.8) fontScale = 0.8;
-  if (fontScale > 1.25) fontScale = 1.25;
+  if (fontScale < 0.8)
+    fontScale = 0.8;
+  if (fontScale > 1.25)
+    fontScale = 1.25;
 
   if (auto btn = dynamic_cast<CustomButton *>(win)) {
     btn->Rescale(scale);
@@ -4500,7 +4485,8 @@ void TPMixer::OnClose(wxCloseEvent &event) {
   delete thReader;
   thReader = nullptr;
 
-  bool autoSave = hid->settings.contains(0x9001) ? (hid->settings[0x9001] != 0) : true;
+  bool autoSave =
+      hid->settings.contains(0x9001) ? (hid->settings[0x9001] != 0) : true;
   if (autoSave) {
     saveSettings();
   }
