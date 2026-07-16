@@ -952,7 +952,7 @@ public:
 
   FaderStrip(wxWindow *parent, wxWindowID id, int minVal, int maxVal,
              bool stereo = false, const wxSize &size = wxSize(45, 120))
-      : wxWindow(parent, id, wxDefaultPosition, size, wxBORDER_NONE),
+      : wxWindow(parent, id, wxDefaultPosition, size, wxBORDER_NONE | wxWANTS_CHARS),
         m_val(0), m_min(minVal), m_max(maxVal), m_stereo(stereo),
         m_leftVal(-960), m_rightVal(-960),
         m_leftPeak(-960), m_rightPeak(-960),
@@ -961,12 +961,29 @@ public:
     if (m_designSize.x <= 0 || m_designSize.y <= 0) {
       m_designSize = wxSize(45, 120);
     }
+    SetCanFocus(true);
     SetBackgroundStyle(wxBG_STYLE_PAINT);
     Bind(wxEVT_PAINT, &FaderStrip::OnPaint, this);
     Bind(wxEVT_LEFT_DOWN, &FaderStrip::OnLeftDown, this);
     Bind(wxEVT_LEFT_UP, &FaderStrip::OnLeftUp, this);
     Bind(wxEVT_MOTION, &FaderStrip::OnMotion, this);
     Bind(wxEVT_MOUSE_CAPTURE_LOST, &FaderStrip::OnMouseCaptureLost, this);
+    Bind(wxEVT_KEY_DOWN, &FaderStrip::OnKeyDown, this);
+    Bind(wxEVT_SET_FOCUS, [this](wxFocusEvent &evt) { Refresh(); evt.Skip(); });
+    Bind(wxEVT_KILL_FOCUS, [this](wxFocusEvent &evt) { Refresh(); evt.Skip(); });
+  }
+
+  void OnKeyDown(wxKeyEvent &evt) {
+    int key = evt.GetKeyCode();
+    if (key == WXK_UP || key == WXK_RIGHT) {
+      SetValue(m_val + 1);
+      SendScrollEvent();
+    } else if (key == WXK_DOWN || key == WXK_LEFT) {
+      SetValue(m_val - 1);
+      SendScrollEvent();
+    } else {
+      evt.Skip();
+    }
   }
 
   void SetValue(int val) {
@@ -1035,7 +1052,11 @@ private:
     double dy = sz.y / g_uiScale;
     
     gc->SetBrush(wxBrush(wxColour(30, 30, 30)));
-    gc->SetPen(*wxTRANSPARENT_PEN);
+    if (HasFocus()) {
+      gc->SetPen(wxPen(wxColour(29, 115, 201), 1));
+    } else {
+      gc->SetPen(*wxTRANSPARENT_PEN);
+    }
     gc->DrawRectangle(0, 0, dx, dy);
 
     double meterWidth = 4.0;
@@ -1176,6 +1197,7 @@ private:
   }
 
   void OnLeftDown(wxMouseEvent &evt) {
+    SetFocus();
     m_isDragging = true;
     m_dragStartPos = evt.GetPosition();
     m_dragStartVal = m_val;
@@ -1606,13 +1628,13 @@ public:
       wxBoxSizer *faderSizer = new wxBoxSizer(wxHORIZONTAL);
       
       if (col < 2) {
-        slGainI[col] = new FaderStrip(colPanel, ID_INPUT_GAIN + col, minGain, maxGain, false, wxSize(40, 110));
+        slGainI[col] = new FaderStrip(colPanel, ID_INPUT_GAIN + col, minGain, maxGain, false, wxSize(40, 90));
         faderSizer->Add(slGainI[col], 1, wxEXPAND);
       } else {
         // Stereo channel IN 3+4
-        slGainI[2] = new FaderStrip(colPanel, ID_INPUT_GAIN + 2, minGain, maxGain, false, wxSize(32, 110));
-        slGainI[3] = new FaderStrip(colPanel, ID_INPUT_GAIN + 3, minGain, maxGain, false, wxSize(32, 110));
-        slGainICombined = new FaderStrip(colPanel, ID_INPUT_GAIN + 2, minGain, maxGain, true, wxSize(50, 110));
+        slGainI[2] = new FaderStrip(colPanel, ID_INPUT_GAIN + 2, minGain, maxGain, false, wxSize(32, 90));
+        slGainI[3] = new FaderStrip(colPanel, ID_INPUT_GAIN + 3, minGain, maxGain, false, wxSize(32, 90));
+        slGainICombined = new FaderStrip(colPanel, ID_INPUT_GAIN + 2, minGain, maxGain, true, wxSize(50, 90));
         
         faderSizer->Add(slGainI[2], 1, wxEXPAND);
         faderSizer->Add(slGainI[3], 1, wxEXPAND);
@@ -1650,29 +1672,29 @@ public:
         cbSolo[col] = new CustomButton(colPanel, ID_INPUT_SOLO + 2, "SOLO", true, wxSize(36, 15), wxColour(241, 196, 15));
         cbMute[col] = new CustomButton(colPanel, ID_INPUT_MUTE + 2, "MUTE", true, wxSize(36, 15), wxColour(192, 57, 43));
         cbPhase[col] = new CustomButton(colPanel, ID_INPUT_PHASE + 2, "Ø", true, wxSize(36, 15), wxColour(89, 155, 34));
-        combBtnSizer->Add(cbSolo[col], 0, wxBOTTOM, 4);
-        combBtnSizer->Add(cbMute[col], 0, wxBOTTOM, 4);
-        combBtnSizer->Add(cbPhase[col], 0, wxBOTTOM, 4);
+        combBtnSizer->Add(cbSolo[col], 0, wxBOTTOM, 1);
+        combBtnSizer->Add(cbMute[col], 0, wxBOTTOM, 1);
+        combBtnSizer->Add(cbPhase[col], 0, wxBOTTOM, 1);
         btnCol->Add(combBtnSizer, 0, wxEXPAND);
 
         // Split Buttons Container
         splitBtnSizer = new wxBoxSizer(wxHORIZONTAL);
         
         wxBoxSizer *leftBtnCol = new wxBoxSizer(wxVERTICAL);
-        cbSoloL = new CustomButton(colPanel, ID_INPUT_SOLO + 2, "SOLO", true, wxSize(18, 15), wxColour(241, 196, 15));
-        cbMuteL = new CustomButton(colPanel, ID_INPUT_MUTE + 2, "MUTE", true, wxSize(18, 15), wxColour(192, 57, 43));
+        cbSoloL = new CustomButton(colPanel, ID_INPUT_SOLO + 2, "S", true, wxSize(18, 15), wxColour(241, 196, 15));
+        cbMuteL = new CustomButton(colPanel, ID_INPUT_MUTE + 2, "M", true, wxSize(18, 15), wxColour(192, 57, 43));
         cbPhaseL = new CustomButton(colPanel, ID_INPUT_PHASE + 2, "Ø", true, wxSize(18, 15), wxColour(89, 155, 34));
-        leftBtnCol->Add(cbSoloL, 0, wxBOTTOM, 4);
-        leftBtnCol->Add(cbMuteL, 0, wxBOTTOM, 4);
-        leftBtnCol->Add(cbPhaseL, 0, wxBOTTOM, 4);
+        leftBtnCol->Add(cbSoloL, 0, wxBOTTOM, 1);
+        leftBtnCol->Add(cbMuteL, 0, wxBOTTOM, 1);
+        leftBtnCol->Add(cbPhaseL, 0, wxBOTTOM, 1);
         
         wxBoxSizer *rightBtnCol = new wxBoxSizer(wxVERTICAL);
-        cbSoloR = new CustomButton(colPanel, ID_INPUT_SOLO + 3, "SOLO", true, wxSize(18, 15), wxColour(241, 196, 15));
-        cbMuteR = new CustomButton(colPanel, ID_INPUT_MUTE + 3, "MUTE", true, wxSize(18, 15), wxColour(192, 57, 43));
+        cbSoloR = new CustomButton(colPanel, ID_INPUT_SOLO + 3, "S", true, wxSize(18, 15), wxColour(241, 196, 15));
+        cbMuteR = new CustomButton(colPanel, ID_INPUT_MUTE + 3, "M", true, wxSize(18, 15), wxColour(192, 57, 43));
         cbPhaseR = new CustomButton(colPanel, ID_INPUT_PHASE + 3, "Ø", true, wxSize(18, 15), wxColour(89, 155, 34));
-        rightBtnCol->Add(cbSoloR, 0, wxBOTTOM, 4);
-        rightBtnCol->Add(cbMuteR, 0, wxBOTTOM, 4);
-        rightBtnCol->Add(cbPhaseR, 0, wxBOTTOM, 4);
+        rightBtnCol->Add(cbSoloR, 0, wxBOTTOM, 1);
+        rightBtnCol->Add(cbMuteR, 0, wxBOTTOM, 1);
+        rightBtnCol->Add(cbPhaseR, 0, wxBOTTOM, 1);
 
         splitBtnSizer->Add(leftBtnCol, 1, wxEXPAND | wxRIGHT, 1);
         splitBtnSizer->Add(rightBtnCol, 1, wxEXPAND | wxLEFT, 1);
@@ -1864,9 +1886,9 @@ public:
 
       // Horizontal fader sizer to hold linked fader OR split faders
       wxBoxSizer *faderSizer = new wxBoxSizer(wxHORIZONTAL);
-      slVol[i] = new FaderStrip(stripPanel, ID_MIX_VOL_B + i, minGain, maxGain, true, wxSize(50, 100));
-      slVolL[i] = new FaderStrip(stripPanel, ID_MIX_VOL + l, minGain, maxGain, false, wxSize(32, 100));
-      slVolR[i] = new FaderStrip(stripPanel, ID_MIX_VOL + r, minGain, maxGain, false, wxSize(32, 100));
+      slVol[i] = new FaderStrip(stripPanel, ID_MIX_VOL_B + i, minGain, maxGain, true, wxSize(50, 90));
+      slVolL[i] = new FaderStrip(stripPanel, ID_MIX_VOL + l, minGain, maxGain, false, wxSize(32, 90));
+      slVolR[i] = new FaderStrip(stripPanel, ID_MIX_VOL + r, minGain, maxGain, false, wxSize(32, 90));
       
       faderSizer->Add(slVolL[i], 1, wxEXPAND);
       faderSizer->Add(slVolR[i], 1, wxEXPAND);
@@ -1893,8 +1915,8 @@ public:
       if (i < 2 && pid == 0x8754) combBtnSizer[i]->Add(ckPhaseCombined[i], 0, wxALIGN_CENTER | wxBOTTOM, 2);
       else ckPhaseCombined[i]->Hide();
 
-      combBtnSizer[i]->Add(ckSolo[i], 0, wxALIGN_CENTER | wxBOTTOM, 2);
-      combBtnSizer[i]->Add(ckMute[i], 0, wxALIGN_CENTER | wxBOTTOM, 2);
+      combBtnSizer[i]->Add(ckSolo[i], 0, wxALIGN_CENTER | wxBOTTOM, 1);
+      combBtnSizer[i]->Add(ckMute[i], 0, wxALIGN_CENTER | wxBOTTOM, 1);
       if (i == 0) {
         combBtnSizer[i]->Show(false);
       }
@@ -1905,21 +1927,21 @@ public:
       
       wxBoxSizer *lBtnCol = new wxBoxSizer(wxVERTICAL);
       ckPhase[l] = new CustomButton(stripPanel, ID_MIX_PHASE + l, "Ø", true, wxSize(18, 13), wxColour(89, 155, 34));
-      ckSoloL[i] = new CustomButton(stripPanel, ID_MIX_SOLO + i, "SOLO", true, wxSize(18, 15), wxColour(241, 196, 15));
-      ckMuteL[i] = new CustomButton(stripPanel, ID_MIX_MUTE + i, "MUTE", true, wxSize(18, 15), wxColour(192, 57, 43));
-      if (i < 2 && pid == 0x8754) lBtnCol->Add(ckPhase[l], 0, wxBOTTOM, 2);
+      ckSoloL[i] = new CustomButton(stripPanel, ID_MIX_SOLO + i, "S", true, wxSize(18, 15), wxColour(241, 196, 15));
+      ckMuteL[i] = new CustomButton(stripPanel, ID_MIX_MUTE + i, "M", true, wxSize(18, 15), wxColour(192, 57, 43));
+      if (i < 2 && pid == 0x8754) lBtnCol->Add(ckPhase[l], 0, wxBOTTOM, 1);
       else ckPhase[l]->Hide();
-      lBtnCol->Add(ckSoloL[i], 0, wxBOTTOM, 2);
-      lBtnCol->Add(ckMuteL[i], 0, wxBOTTOM, 2);
+      lBtnCol->Add(ckSoloL[i], 0, wxBOTTOM, 1);
+      lBtnCol->Add(ckMuteL[i], 0, wxBOTTOM, 1);
 
       wxBoxSizer *rBtnCol = new wxBoxSizer(wxVERTICAL);
       ckPhase[r] = new CustomButton(stripPanel, ID_MIX_PHASE + r, "Ø", true, wxSize(18, 13), wxColour(89, 155, 34));
-      ckSoloR[i] = new CustomButton(stripPanel, ID_MIX_SOLO + (i + 10), "SOLO", true, wxSize(18, 15), wxColour(241, 196, 15));
-      ckMuteR[i] = new CustomButton(stripPanel, ID_MIX_MUTE + (i + 10), "MUTE", true, wxSize(18, 15), wxColour(192, 57, 43));
-      if (i < 2 && pid == 0x8754) rBtnCol->Add(ckPhase[r], 0, wxBOTTOM, 2);
+      ckSoloR[i] = new CustomButton(stripPanel, ID_MIX_SOLO + (i + 10), "S", true, wxSize(18, 15), wxColour(241, 196, 15));
+      ckMuteR[i] = new CustomButton(stripPanel, ID_MIX_MUTE + (i + 10), "M", true, wxSize(18, 15), wxColour(192, 57, 43));
+      if (i < 2 && pid == 0x8754) rBtnCol->Add(ckPhase[r], 0, wxBOTTOM, 1);
       else ckPhase[r]->Hide();
-      rBtnCol->Add(ckSoloR[i], 0, wxBOTTOM, 2);
-      rBtnCol->Add(ckMuteR[i], 0, wxBOTTOM, 2);
+      rBtnCol->Add(ckSoloR[i], 0, wxBOTTOM, 1);
+      rBtnCol->Add(ckMuteR[i], 0, wxBOTTOM, 1);
 
       splitBtnSizer[i]->Add(lBtnCol, 1, wxEXPAND | wxRIGHT, 1);
       splitBtnSizer[i]->Add(rBtnCol, 1, wxEXPAND | wxLEFT, 1);
@@ -2013,7 +2035,7 @@ public:
 
     wxBoxSizer *stripsSizer = new wxBoxSizer(wxHORIZONTAL);
 
-    int numStrips = (pid == 0x8754) ? 3 : 1;
+    int numStrips = 3;
     for (int i = 0; i < numStrips; ++i) {
       wxPanel *stripPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, "stripPanel");
       stripPanel->SetBackgroundColour(wxColour(25, 25, 25));
@@ -2066,8 +2088,8 @@ public:
       btnZoneSizer->Add(combBtnSizer[i], 0, wxEXPAND);
 
       splitBtnSizer[i] = new wxBoxSizer(wxHORIZONTAL);
-      ckMuteL[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + i, "MUTE", true, wxSize(18, 16), wxColour(192, 57, 43));
-      ckMuteR[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + (i + 10), "MUTE", true, wxSize(18, 16), wxColour(192, 57, 43));
+      ckMuteL[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + i, "M", true, wxSize(18, 16), wxColour(192, 57, 43));
+      ckMuteR[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + (i + 10), "M", true, wxSize(18, 16), wxColour(192, 57, 43));
       splitBtnSizer[i]->Add(ckMuteL[i], 1, wxEXPAND | wxRIGHT, 1);
       splitBtnSizer[i]->Add(ckMuteR[i], 1, wxEXPAND | wxLEFT, 1);
       btnZoneSizer->Add(splitBtnSizer[i], 0, wxEXPAND);
@@ -2227,9 +2249,9 @@ public:
       stripSizer->Add(lbOutVolVal[i], 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, 2);
 
       wxBoxSizer *faderSizer = new wxBoxSizer(wxHORIZONTAL);
-      slOutput[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_B + i, minGain, maxGain, true, wxSize(50, 95));
-      slOutputL[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_L + i, minGain, maxGain, false, wxSize(32, 95));
-      slOutputR[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_R + i, minGain, maxGain, false, wxSize(32, 95));
+      slOutput[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_B + i, minGain, maxGain, true, wxSize(50, 90));
+      slOutputL[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_L + i, minGain, maxGain, false, wxSize(32, 90));
+      slOutputR[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_R + i, minGain, maxGain, false, wxSize(32, 90));
       
       faderSizer->Add(slOutputL[i], 1, wxEXPAND);
       faderSizer->Add(slOutputR[i], 1, wxEXPAND);
@@ -2267,8 +2289,8 @@ public:
         btnZoneSizer->Add(combBtnSizer[i], 0, wxEXPAND);
 
         splitBtnSizer[i] = new wxBoxSizer(wxHORIZONTAL);
-        ckMuteL[i] = new CustomButton(stripPanel, ID_OUTPUT_MON + i, "MUTE", true, wxSize(18, 16), wxColour(192, 57, 43));
-        ckMuteR[i] = new CustomButton(stripPanel, ID_OUTPUT_MON + (i + 10), "MUTE", true, wxSize(18, 16), wxColour(192, 57, 43));
+        ckMuteL[i] = new CustomButton(stripPanel, ID_OUTPUT_MON + i, "M", true, wxSize(18, 16), wxColour(192, 57, 43));
+        ckMuteR[i] = new CustomButton(stripPanel, ID_OUTPUT_MON + (i + 10), "M", true, wxSize(18, 16), wxColour(192, 57, 43));
         splitBtnSizer[i]->Add(ckMuteL[i], 1, wxEXPAND | wxRIGHT, 1);
         splitBtnSizer[i]->Add(ckMuteR[i], 1, wxEXPAND | wxLEFT, 1);
         btnZoneSizer->Add(splitBtnSizer[i], 0, wxEXPAND);
@@ -2673,7 +2695,7 @@ TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "TOPPING Professional Control Ce
   panelLoopbacks = new PanelLoopbacks(this, hid->pid);
   panelOutputs = new PanelOutputs(this, hid->pid);
 
-  int leftWidth = (hid->pid == 0x8754) ? 400 : (((hid->pid == 0x8752 || hid->pid == 0x8756) ? 280 : 180));
+  int leftWidth = 400;
 
   panelInputs->SetMinSize(wxSize(leftWidth, -1));
   panelInputs->SetMaxSize(wxSize(leftWidth, -1));
@@ -3032,7 +3054,14 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
     case 0x05:
       {
         int phoneIdx = logicCh - 4;
-        if (subCh == 2) {
+        if (subCh == 1) {
+          if (val >= 1 && val <= 14) {
+            if (panelOutputs->cbSelect[phoneIdx]) {
+              panelOutputs->cbSelect[phoneIdx]->SetSelection(val - 1);
+            }
+            hid->settings[0x3501 + (phoneIdx << 8)] = val;
+          }
+        } else if (subCh == 2) {
           panelOutputs->m_phoneGain[phoneIdx] = val ? true : false;
           if (panelOutputs->choicePhoneOut->GetSelection() == phoneIdx) {
             if (panelOutputs->btnPhoneGain) panelOutputs->btnPhoneGain->SetValue(val ? true : false);
@@ -3135,6 +3164,7 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
         if (panelLoopbacks->cbSelect[loopIdx]) {
           panelLoopbacks->cbSelect[loopIdx]->SetSelection(val - 1);
         }
+        hid->settings[0x5701 + (loopIdx << 8)] = val;
       }
     }
   } break;
@@ -3230,7 +3260,7 @@ void ScaleUIElements(wxWindow *win, double scale) {
 }
 
 void TPMixer::RescaleUI(double scale) {
-  int leftWidth = (hid->pid == 0x8754) ? 400 : (((hid->pid == 0x8752 || hid->pid == 0x8756) ? 280 : 180));
+  int leftWidth = 400;
   int rightWidth = 680;
   
   panelInputs->SetMinSize(wxSize(leftWidth * scale, -1));
@@ -3259,7 +3289,7 @@ void TPMixer::RescaleUI(double scale) {
 
 void TPMixer::OnSize(wxSizeEvent &event) {
   wxSize size = GetClientSize();
-  int leftWidth = (hid->pid == 0x8754) ? 400 : (((hid->pid == 0x8752 || hid->pid == 0x8756) ? 280 : 180));
+  int leftWidth = 400;
   int rightWidth = 680;
   int designWidth = leftWidth + rightWidth + 24;
   int designHeight = 580;
@@ -3460,6 +3490,10 @@ void TPMixer::refreshLoopbackUi() {
         wxString lblR = mutedR ? "-inf" : std::format("{:.0f}", (double)gainDBR);
         panelLoopbacks->lbLoopVolVal[i]->SetLabel(lblL + "  " + lblR);
       }
+      int32_t selVal = hid->settings[0x5701 + (i << 8)];
+      if (panelLoopbacks->cbSelect[i] && selVal >= 1 && selVal <= 14) {
+        panelLoopbacks->cbSelect[i]->SetSelection(selVal - 1);
+      }
     }
   }
   panelLoopbacks->Layout();
@@ -3505,6 +3539,10 @@ void TPMixer::refreshOutputUi() {
         wxString lblL = mutedL ? "-inf" : std::format("{:.0f}", (double)gainDBL);
         wxString lblR = mutedR ? "-inf" : std::format("{:.0f}", (double)gainDBR);
         panelOutputs->lbOutVolVal[i]->SetLabel(lblL + "  " + lblR);
+      }
+      int32_t selVal = hid->settings[0x3501 + (i << 8)];
+      if (panelOutputs->cbSelect[i] && selVal >= 1 && selVal <= 14) {
+        panelOutputs->cbSelect[i]->SetSelection(selVal - 1);
       }
     }
   }
@@ -3626,9 +3664,15 @@ void TPMixer::OnMixVolumeChanged(int stripIdx) {
     }
   }
 
-  auto [gL, gR_dummy] = gain->getStereoGain(gainDBL, muteL, soloL, anySolo, phaseL, panL); 
-  auto [gL_dummy, gR] = gain->getStereoGain(gainDBR, muteR, soloR, anySolo, phaseR, panR);
-  hid->setMixVol(bus, stripIdx, gL, gR);
+  auto [gL_L, gL_R] = gain->getStereoGain(gainDBL, muteL, soloL, anySolo, phaseL, panL); 
+  auto [gR_L, gR_R] = gain->getStereoGain(gainDBR, muteR, soloR, anySolo, phaseR, panR);
+  hid->setMixVol(bus, stripIdx * 2, gL_L, gL_R);
+  hid->settings[((0x61 + bus * 2) << 8) | (stripIdx * 2 + 1)] = gL_L;
+  hid->settings[((0x62 + bus * 2) << 8) | (stripIdx * 2 + 1)] = gL_R;
+  
+  hid->setMixVol(bus, stripIdx * 2 + 1, gR_L, gR_R);
+  hid->settings[((0x61 + bus * 2) << 8) | (stripIdx * 2 + 2)] = gR_L;
+  hid->settings[((0x62 + bus * 2) << 8) | (stripIdx * 2 + 2)] = gR_R;
 }
 
 void TPMixer::OnOutputVolume(wxCommandEvent &event) {
