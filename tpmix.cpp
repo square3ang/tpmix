@@ -19,26 +19,26 @@
 #include <cstdint>
 #include <cstdlib>
 #include <format>
-
 #include <filesystem>
 #include <map>
 #include <set>
 #include <thread>
 #include <tuple>
-
-#include <wx/checkbox.h>
-#include <wx/gbsizer.h>
-#include <wx/notebook.h>
-#include <wx/panel.h>
-#include <wx/slider.h>
-#include <wx/tglbtn.h>
-#include <wx/wx.h>
-
-#include <inttypes.h>
+#include <algorithm>
+#include <iostream>
 #include <math.h>
 
+#include <wx/wx.h>
+#include <wx/dcbuffer.h>
+#include <wx/graphics.h>
+#include <wx/statline.h>
+#include <wx/tglbtn.h>
+#include <wx/combobox.h>
+
+#include <inttypes.h>
 #include <hidapi/hidapi.h>
 
+// Helper functions for HID buffer manipulation
 void write32BE(uint8_t *buf, int32_t v32) {
   buf[0] = (v32 >> 24) & 0xff;
   buf[1] = (v32 >> 16) & 0xff;
@@ -63,18 +63,9 @@ uint32_t read32BE(uint8_t *buf) {
   return v;
 }
 
-void printBuf8(const uint8_t *buf, size_t n,
-               const char *prefix = (const char *)"") {
-  printf(prefix);
-  for (size_t i = 0; i < n; ++i) {
-    if ((i != 0) && (0 == i % 4)) {
-      printf(" ");
-    }
-    printf("%02x ", buf[i]);
-  }
-  printf("\n");
-}
+double g_uiScale = 1.0;
 
+// Gain calculation class
 class Gain {
 protected:
   const static int32_t POS_RANGE = 36;
@@ -123,9 +114,6 @@ public:
     return gain;
   };
 
-  /**
-   * @param percentPan: -100..100, -100 for full left, 100 for full right
-   */
   std::tuple<int32_t, int32_t> getStereoGain(int32_t dBGain, bool mute,
                                              bool solo, bool anySolo,
                                              bool phase, int32_t percentPan) {
@@ -138,6 +126,7 @@ public:
   };
 };
 
+// HID communication class
 class ToppingHID {
 public:
   uint16_t vid = 0x152a;
@@ -238,31 +227,12 @@ public:
       settings[0x100a] = 1; // LED Brightness default: Medium (1)
   }
 
-  void readInfo() {
-    int res = 0;
-    const static size_t MAX_STR = 256;
-    wchar_t wstr[MAX_STR];
-    res = hid_get_manufacturer_string(handle, wstr, MAX_STR - 1);
-    printf("Manufacturer String: %ls\n", wstr);
-
-    res = hid_get_product_string(handle, wstr, MAX_STR);
-    printf("Product String: %ls\n", wstr);
-
-    res = hid_get_serial_number_string(handle, wstr, MAX_STR);
-    printf("Serial Number String: %ls\n", wstr);
-    (void)res;
-  }
-
-  // @param: ch 0..3, logic channel 1..4
-  // @param: gain 0x80000000..0x7fffffff, in fixedpoint
   void setInputGainiI32(int16_t ch, int32_t gain, bool exec = true) {
     buf[5] = 0x21 + ch;
     buf[6] = 0x05;
     write32BE(&buf[7], gain);
     enqueue(exec);
   };
-  // @param: ch 0..3, logic channel 1..4
-  // @param: on: 0/1, 1 turn on phantom power
   void setInput48V(int16_t ch, bool pOn, bool exec = true) {
     buf[5] = 0x21 + ch;
     buf[6] = 0x02;
@@ -270,9 +240,6 @@ public:
     write32BE(&buf[7], on32);
     enqueue(exec);
   };
-
-  // @param: ch 0..3, logic channel 1..4
-  // @param: on: 0/1, 1 turn on phantom power
   void setInputMon(int16_t ch, bool MonOn, bool exec = true) {
     buf[5] = 0x21 + ch;
     buf[6] = 0x01;
@@ -280,9 +247,6 @@ public:
     write32BE(&buf[7], on32);
     enqueue(exec);
   };
-
-  // @param: ch 0..3, logic channel 1..4
-  // @param: on: 0/1, 1 turn on Instrument/Hi-Z
   void setInputInst(int16_t ch, bool InstOn, bool exec = true) {
     buf[5] = 0x21 + ch;
     buf[6] = 0x03;
@@ -290,9 +254,6 @@ public:
     write32BE(&buf[7], on32);
     enqueue(exec);
   };
-
-  // @param: bus 0..3, for Bus A..D
-  // @param: src 0..3, for inour 1..4, 4..b: for playback 1..8
   void setMixVol(int32_t bus, int32_t src, int32_t gainL, int32_t gainR,
                  bool exec = true) {
     int32_t l = bus * 2;
@@ -307,126 +268,72 @@ public:
     write32BE(&buf[7], gainR);
     enqueue(exec);
   };
-
-  // @param: ch 0..1, logic phone 1, 2
-  // @param: sel 1..14: 1..4: input 1..4; 5,6: input 1/2, 3/4; 7..10, play 1/2
-  // ..7/8,  11..14: Mix A..D
   void setLoopSel(int16_t ch, int32_t sel, bool exec = true) {
     buf[5] = 0x57 + ch;
     buf[6] = 0x01;
     write32BE(&buf[7], sel);
     enqueue(exec);
   };
-
-  // @param: ch 0..1, logic phone 1, 2
-  // @param: gain 0..1, 0: 0dB, 1: +17dB
   void setLoopVol(int16_t ch, int32_t gain, bool exec = true) {
     buf[5] = 0x51 + ch;
     buf[6] = 0x03;
     write32BE(&buf[7], gain);
     enqueue(exec);
   };
-
-  // @param: ch 0..1, logic phone 1, 2
-  // @param: sel 1..14: 1..4: input 1..4; 5,6: input 1/2, 3/4; 7..10, play 1/2
-  // ..7/8,  11..14: Mix A..D
   void setOutputSel(int16_t ch, int32_t sel, bool exec = true) {
     buf[5] = 0x35 + ch;
     buf[6] = 0x01;
     write32BE(&buf[7], sel);
     enqueue(exec);
   };
-
-  // @param: ch 0..1, logic phone 1, 2
-  // @param: gain 0..1, 0: 0dB, 1: +17dB
   void setOutputVol(int16_t ch, int32_t gain, bool exec = true) {
     buf[5] = 0x31 + ch;
     buf[6] = 0x03;
     write32BE(&buf[7], gain);
     enqueue(exec);
   };
-
-  // @param: ch 0..1, logic output 1, 2
-  // @param: on 0 1
   void setOutputMon(int16_t ch, bool on, bool exec = true) {
     buf[5] = 0x37;
     buf[6] = 0x01 + ch;
     write32BE(&buf[7], on ? 1 : 0);
     enqueue(exec);
   };
-
-  // @param: ch 0..1, logic output 1, 2
-  // @param: on 0,1
   void setOutputLine(int16_t ch, bool on, bool exec = true) {
     buf[5] = 0x37;
     buf[6] = 0x03 + ch;
     write32BE(&buf[7], on ? 1 : 0);
     enqueue(exec);
   };
-
-  // @param: ch 0..1, logic phone 1, 2
-  // @param: mix -100..100, -100 full input, 100 full playback
   void setPhoneMix(int16_t ch, int32_t mix, bool exec = true) {
     buf[5] = 0x35 + ch;
     buf[6] = 0x03;
     write32BE(&buf[7], (mix + 100) / 2);
     enqueue(exec);
   };
-
-  // @param: ch 0..1, logic phone 1, 2
-  // @param: gain 0..1, 0: 0dB, 1: +17dB
   void setPhoneGainBoost(int16_t ch, int32_t gain, bool exec = true) {
     buf[5] = 0x35 + ch;
     buf[6] = 0x02;
     write32BE(&buf[7], gain);
     enqueue(exec);
   };
-
   void saveDeviceDefault() {
     buf[5] = 0x11;
     buf[6] = 0x06;
     write32BE(&buf[7], 1);
     enqueue(true, false);
   };
-
   void requestDeviceDump() {
     buf[5] = 0x11;
     buf[6] = 0x05;
     write32BE(&buf[7], 1);
     enqueue(true, false);
   };
-
   void setDeviceSetting(uint8_t zone, uint8_t ctrl, int32_t value,
                         bool exec = true) {
     buf[5] = zone;
     buf[6] = ctrl;
     write32BE(&buf[7], value);
     enqueue(exec);
-  };
-
-  void pushAllSettingsToDevice() {
-    for (const auto &[key, value] : settings) {
-      uint8_t zone = key >> 8;
-      uint8_t ctrl = key & 0xFF;
-
-      // Skip level meters (read-only)
-      if (ctrl == 0x04 && zone >= 0x21 && zone <= 0x24)
-        continue;
-      if ((ctrl == 0x01 || ctrl == 0x02) && zone >= 0x31 && zone <= 0x34)
-        continue;
-
-      // For E1x2, skip inactive input channels
-      if (numInputs == 1 && zone >= 0x22 && zone <= 0x24)
-        continue;
-      if (numInputs == 2 && zone >= 0x23 && zone <= 0x24)
-        continue;
-
-      buf[5] = zone;
-      buf[6] = ctrl;
-      write32BE(&buf[7], value);
-      enqueue(true, false);
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
   };
 
   uint16_t calculate_crc16(const uint8_t *data, size_t len) {
@@ -454,8 +361,6 @@ public:
       buf[11] = 0x00;
       buf[12] = 0x00;
     }
-    // TODO queue
-    // printBuf8(buf, 16, ">> ");
     if (NULL != handle && exec) {
       res = hid_write(handle, buf, 16);
     }
@@ -475,7 +380,6 @@ public:
 
 protected:
   uint8_t buf[16];
-
   const uint8_t header[5] = {0x22, 0x33, 0x20, 0x01, 0x01};
   const uint8_t tail[5] = {0x00, 0x00, 0x66, 0x77, 0x00};
   hid_device *handle;
@@ -490,21 +394,11 @@ struct GdkForceX11 {
   GdkForceX11() { setenv("GDK_BACKEND", "x11", 1); }
 } gdk_force_x11;
 
-class MyApp : public wxApp {
-public:
-  bool OnInit() override;
-  int OnExit() override {
-    hid_exit();
-    return wxApp::OnExit();
-  }
-};
-
-wxIMPLEMENT_APP(MyApp);
-
-// wx ID range <= 32767
+// IDs range
 enum {
-  ID_LOAD = 0x0001,
+  ID_SETTINGS = 0x0002,
   ID_SAVE = 0x0010,
+  ID_LOAD = 0x0001,
   ID_DEVICE_SAVE = 0x0020,
 
   ID_INPUT_GAIN = 0x220,
@@ -515,6 +409,7 @@ enum {
   ID_INPUT_MUTE = 0x280,
   ID_INPUT_PHASE = 0x290,
   ID_INPUT_PEAK = 0x2a0,
+  ID_INPUT_LINK = 0x2b0,
 
   ID_MIX_BUS_SEL = 0x610,
   ID_MIX_VOL = 0x620,
@@ -523,6 +418,7 @@ enum {
   ID_MIX_SOLO = 0x670,
   ID_MIX_MUTE = 0x680,
   ID_MIX_PHASE = 0x690,
+  ID_MIX_LINK = 0x6b0,
 
   ID_OUTPUT_SEL = 0x310,
   ID_OUTPUT_VOL_L = 0x320,
@@ -530,751 +426,1933 @@ enum {
   ID_OUTPUT_VOL_R = 0x340,
   ID_OUTPUT_MON = 0x350,
   ID_OUTPUT_LINE = 0x360,
+  ID_OUTPUT_LINK = 0x3b0,
 
   ID_LOOP_SEL = 0x510,
   ID_LOOP_VOL_L = 0x520,
   ID_LOOP_VOL_B = 0x530,
   ID_LOOP_VOL_R = 0x540,
   ID_LOOP_MUTE = 0x550,
+  ID_LOOP_LINK = 0x5b0,
 
   ID_PHONE_MIX = 0x370,
   ID_PHONE_GAIN = 0x380,
+  ID_PHONE_SEL = 0x390,
 };
+
+// Directory helper
+void createDir(const std::string path) {
+  if (!std::filesystem::exists(path)) {
+    try {
+      std::filesystem::create_directory(path);
+    } catch (...) {}
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Custom Controls
+// ----------------------------------------------------------------------------
+
+enum IconType {
+  ICON_NONE,
+  ICON_GEAR,
+  ICON_SAVE,
+  ICON_DOWNLOAD,
+  ICON_HEADPHONE
+};
+
+class CustomButton : public wxWindow {
+public:
+  wxSize m_designSize;
+  double m_designFontPoint;
+
+  CustomButton(wxWindow *parent, wxWindowID id, const wxString &label,
+               bool isToggle = false, const wxSize &size = wxDefaultSize,
+               const wxColour &activeCol = wxColour(29, 115, 201),
+               IconType iconType = ICON_NONE)
+      : wxWindow(parent, id, wxDefaultPosition, size, wxBORDER_NONE),
+        m_label(label), m_isToggle(isToggle), m_isChecked(false),
+        m_isPressed(false), m_isHovered(false), m_activeCol(activeCol),
+        m_iconType(iconType) {
+    m_designSize = size;
+    if (m_designSize.x <= 0 || m_designSize.y <= 0) {
+      m_designSize = wxSize(45, 14);
+    }
+    m_designFontPoint = 8.0;
+    SetBackgroundStyle(wxBG_STYLE_PAINT);
+    
+    Bind(wxEVT_PAINT, &CustomButton::OnPaint, this);
+    Bind(wxEVT_LEFT_DOWN, &CustomButton::OnLeftDown, this);
+    Bind(wxEVT_LEFT_UP, &CustomButton::OnLeftUp, this);
+    Bind(wxEVT_MOTION, &CustomButton::OnMotion, this);
+    Bind(wxEVT_LEAVE_WINDOW, &CustomButton::OnLeave, this);
+    Bind(wxEVT_ENTER_WINDOW, &CustomButton::OnEnter, this);
+    Bind(wxEVT_MOUSE_CAPTURE_LOST, &CustomButton::OnMouseCaptureLost, this);
+  }
+
+  void SetValue(bool value) {
+    if (m_isChecked != value) {
+      m_isChecked = value;
+      Refresh();
+    }
+  }
+
+  bool GetValue() const { return m_isChecked; }
+
+  void SetLabel(const wxString &label) override {
+    m_label = label;
+    wxWindow::SetLabel(label);
+    Refresh();
+  }
+
+  void Rescale(double scale) {
+    SetMinSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+    SetMaxSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+  }
+
+private:
+  wxString m_label;
+  bool m_isToggle;
+  bool m_isChecked;
+  bool m_isPressed;
+  bool m_isHovered;
+  wxColour m_activeCol;
+  IconType m_iconType;
+
+  void OnPaint(wxPaintEvent &evt) {
+    wxAutoBufferedPaintDC dc(this);
+    dc.Clear();
+    
+    wxGraphicsContext *gc = wxGraphicsContext::Create(dc);
+    if (!gc) return;
+
+    gc->Scale(g_uiScale, g_uiScale);
+    wxSize sz = GetSize();
+    double dx = sz.x / g_uiScale;
+    double dy = sz.y / g_uiScale;
+    
+    // Background based on state
+    wxColour bgCol;
+    if (m_isToggle && m_isChecked) {
+      bgCol = m_activeCol;
+    } else if (m_isPressed) {
+      bgCol = wxColour(40, 40, 40);
+    } else if (m_isHovered) {
+      bgCol = wxColour(60, 60, 60);
+    } else {
+      bgCol = wxColour(44, 44, 44);
+    }
+
+    gc->SetBrush(wxBrush(bgCol));
+    gc->SetPen(wxPen(wxColour(24, 24, 24), 1));
+    gc->DrawRoundedRectangle(0, 0, dx, dy, 4);
+
+    double cx = dx / 2.0;
+    double cy = dy / 2.0;
+
+    if (m_iconType == ICON_NONE) {
+      // Draw standard text label
+      wxColour textCol = (m_isToggle && m_isChecked) ? wxColour(255, 255, 255) : wxColour(180, 180, 180);
+      wxFont font = GetFont();
+      font.SetPointSize(8);
+      gc->SetFont(font, textCol);
+      
+      double tw, th, td, tel;
+      gc->GetTextExtent(m_label, &tw, &th, &td, &tel);
+      gc->DrawText(m_label, (dx - tw) / 2.0, (dy - th) / 2.0);
+    } else {
+      // Draw Vector Icon
+      gc->SetPen(wxPen((m_isToggle && m_isChecked) ? *wxWHITE : wxColour(220, 220, 220), 1.5));
+      gc->SetBrush(*wxTRANSPARENT_BRUSH);
+
+      if (m_iconType == ICON_GEAR) {
+        double rOuter = 5.5;
+        double rInner = 2.5;
+        gc->DrawEllipse(cx - rOuter, cy - rOuter, rOuter * 2, rOuter * 2);
+        gc->SetBrush(wxBrush(bgCol));
+        gc->DrawEllipse(cx - rInner, cy - rInner, rInner * 2, rInner * 2);
+        
+        gc->SetPen(wxPen((m_isToggle && m_isChecked) ? *wxWHITE : wxColour(220, 220, 220), 1.6));
+        for (int i = 0; i < 8; ++i) {
+          double angle = i * M_PI / 4.0;
+          double x1 = cx + rOuter * cos(angle);
+          double y1 = cy + rOuter * sin(angle);
+          double x2 = cx + (rOuter + 2.0) * cos(angle);
+          double y2 = cy + (rOuter + 2.0) * sin(angle);
+          gc->StrokeLine(x1, y1, x2, y2);
+        }
+      } else if (m_iconType == ICON_SAVE) {
+        double w = 10.0;
+        double h = 10.0;
+        double x = cx - w/2.0;
+        double y = cy - h/2.0;
+        
+        wxGraphicsPath path = gc->CreatePath();
+        path.MoveToPoint(x, y + h);
+        path.AddLineToPoint(x + w, y + h);
+        path.AddLineToPoint(x + w, y + 2.0);
+        path.AddLineToPoint(x + w - 2.0, y);
+        path.AddLineToPoint(x, y);
+        path.CloseSubpath();
+        gc->StrokePath(path);
+        
+        gc->DrawRectangle(cx - 2.5, cy + 1.0, 5.0, 3.5);
+        gc->DrawRectangle(cx - 2.5, cy - 4.5, 4.0, 2.5);
+      } else if (m_iconType == ICON_DOWNLOAD) {
+        gc->StrokeLine(cx - 4.5, cy + 4.5, cx + 4.5, cy + 4.5);
+        gc->StrokeLine(cx, cy - 5.0, cx, cy + 2.0);
+        gc->StrokeLine(cx - 2.5, cy - 0.5, cx, cy + 2.0);
+        gc->StrokeLine(cx + 2.5, cy - 0.5, cx, cy + 2.0);
+      } else if (m_iconType == ICON_HEADPHONE) {
+        double r = 4.5;
+        wxGraphicsPath path = gc->CreatePath();
+        path.AddArc(cx, cy + 1.0, r, M_PI, 0, true);
+        gc->StrokePath(path);
+        
+        gc->SetBrush(wxBrush((m_isToggle && m_isChecked) ? *wxWHITE : wxColour(220, 220, 220)));
+        gc->DrawRectangle(cx - r - 1.0, cy, 1.8, 3.5);
+        gc->DrawRectangle(cx + r - 0.8, cy, 1.8, 3.5);
+      }
+    }
+
+    delete gc;
+  }
+
+  void OnLeftDown(wxMouseEvent &evt) {
+    m_isPressed = true;
+    if (m_isToggle) {
+      m_isChecked = !m_isChecked;
+    }
+    CaptureMouse();
+    Refresh();
+    SendClickEvent();
+  }
+
+  void OnLeftUp(wxMouseEvent &evt) {
+    if (HasCapture()) {
+      ReleaseMouse();
+    }
+    m_isPressed = false;
+    Refresh();
+    if (!m_isToggle) {
+      SendClickEvent();
+    }
+  }
+
+  void OnMouseCaptureLost(wxMouseCaptureLostEvent &evt) {
+    m_isPressed = false;
+    Refresh();
+  }
+
+  void OnMotion(wxMouseEvent &evt) {
+    wxPoint pos = evt.GetPosition();
+    wxSize sz = GetSize();
+    bool inside = (pos.x >= 0 && pos.x < sz.x && pos.y >= 0 && pos.y < sz.y);
+    if (inside != m_isHovered) {
+      m_isHovered = inside;
+      Refresh();
+    }
+  }
+
+  void OnEnter(wxMouseEvent &evt) {
+    m_isHovered = true;
+    Refresh();
+  }
+
+  void OnLeave(wxMouseEvent &evt) {
+    m_isHovered = false;
+    m_isPressed = false;
+    Refresh();
+  }
+
+  void SendClickEvent() {
+    wxCommandEvent event(wxEVT_TOGGLEBUTTON, GetId());
+    event.SetEventObject(this);
+    event.SetInt(m_isChecked ? 1 : 0);
+    ProcessWindowEvent(event);
+  }
+};
+
+class KnobControl : public wxWindow {
+public:
+  wxSize m_designSize;
+
+  KnobControl(wxWindow *parent, wxWindowID id, const wxString &title,
+              int minVal, int maxVal, int defaultVal,
+              const wxSize &size = wxSize(40, 50))
+      : wxWindow(parent, id, wxDefaultPosition, size, wxBORDER_NONE),
+        m_title(title), m_val(defaultVal), m_min(minVal), m_max(maxVal),
+        m_default(defaultVal), m_isDragging(false) {
+    m_designSize = size;
+    if (m_designSize.x <= 0 || m_designSize.y <= 0) {
+      m_designSize = wxSize(40, 50);
+    }
+    SetBackgroundStyle(wxBG_STYLE_PAINT);
+    Bind(wxEVT_PAINT, &KnobControl::OnPaint, this);
+    Bind(wxEVT_LEFT_DOWN, &KnobControl::OnLeftDown, this);
+    Bind(wxEVT_LEFT_UP, &KnobControl::OnLeftUp, this);
+    Bind(wxEVT_MOTION, &KnobControl::OnMotion, this);
+    Bind(wxEVT_LEFT_DCLICK, &KnobControl::OnDoubleClick, this);
+    Bind(wxEVT_MOUSE_CAPTURE_LOST, &KnobControl::OnMouseCaptureLost, this);
+  }
+
+  void SetValue(int val) {
+    val = std::clamp(val, m_min, m_max);
+    if (m_val != val) {
+      m_val = val;
+      Refresh();
+    }
+  }
+
+  int GetValue() const { return m_val; }
+
+  void Rescale(double scale) {
+    SetMinSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+    SetMaxSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+  }
+
+private:
+  wxString m_title;
+  int m_val;
+  int m_min;
+  int m_max;
+  int m_default;
+  bool m_isDragging;
+  wxPoint m_dragStartPos;
+  int m_dragStartVal;
+
+  void OnPaint(wxPaintEvent &evt) {
+    wxAutoBufferedPaintDC dc(this);
+    dc.Clear();
+    wxGraphicsContext *gc = wxGraphicsContext::Create(dc);
+    if (!gc) return;
+
+    gc->Scale(g_uiScale, g_uiScale);
+    wxSize sz = GetSize();
+    double dx = sz.x / g_uiScale;
+    double dy = sz.y / g_uiScale;
+    
+    gc->SetBrush(wxBrush(wxColour(30, 30, 30)));
+    gc->SetPen(*wxTRANSPARENT_PEN);
+    gc->DrawRectangle(0, 0, dx, dy);
+
+    double knobRadius = std::min(dx, dy - 12) / 2.0 - 2;
+    double knobCenterX = dx / 2.0;
+    double knobCenterY = (dy - 12) / 2.0 + 1;
+
+    gc->SetBrush(wxBrush(wxColour(16, 16, 16)));
+    gc->DrawEllipse(knobCenterX - knobRadius, knobCenterY - knobRadius, knobRadius * 2, knobRadius * 2);
+
+    gc->SetBrush(wxBrush(wxColour(46, 46, 46)));
+    gc->SetPen(wxPen(wxColour(75, 75, 75), 1));
+    gc->DrawEllipse(knobCenterX - knobRadius + 1, knobCenterY - knobRadius + 1, (knobRadius - 1) * 2, (knobRadius - 1) * 2);
+
+    double pct = (double)(m_val - m_min) / (m_max - m_min);
+    double angleDeg = -135.0 + pct * 270.0;
+    double angleRad = angleDeg * M_PI / 180.0;
+
+    double px = knobCenterX + (knobRadius - 3) * sin(angleRad);
+    double py = knobCenterY - (knobRadius - 3) * cos(angleRad);
+    gc->SetPen(wxPen(wxColour(255, 255, 255), 1.8));
+    gc->StrokeLine(knobCenterX, knobCenterY, px, py);
+
+    wxFont font = GetFont();
+    font.SetPointSize(8);
+    gc->SetFont(font, wxColour(150, 150, 150));
+    wxString valStr = std::format("{:+}", m_val);
+    if (m_val == 0) valStr = "+0";
+    
+    double tw, th, td, tel;
+    gc->GetTextExtent(valStr, &tw, &th, &td, &tel);
+    gc->DrawText(valStr, (dx - tw) / 2.0, dy - th - 1);
+
+    delete gc;
+  }
+
+  void OnLeftDown(wxMouseEvent &evt) {
+    m_isDragging = true;
+    m_dragStartPos = evt.GetPosition();
+    m_dragStartVal = m_val;
+    CaptureMouse();
+  }
+
+  void OnLeftUp(wxMouseEvent &evt) {
+    if (HasCapture()) {
+      ReleaseMouse();
+    }
+    m_isDragging = false;
+  }
+
+  void OnMouseCaptureLost(wxMouseCaptureLostEvent &evt) {
+    m_isDragging = false;
+    Refresh();
+  }
+
+  void OnMotion(wxMouseEvent &evt) {
+    if (m_isDragging) {
+      wxPoint currPos = evt.GetPosition();
+      int dy = m_dragStartPos.y - currPos.y; 
+      int valRange = m_max - m_min;
+      
+      int delta = dy * (valRange / 120.0);
+      if (delta == 0 && dy != 0) {
+        delta = (dy > 0) ? 1 : -1;
+      }
+      
+      int newVal = std::clamp(m_dragStartVal + delta, m_min, m_max);
+      if (newVal != m_val) {
+        m_val = newVal;
+        Refresh();
+        
+        wxCommandEvent event(wxEVT_SLIDER, GetId());
+        event.SetEventObject(this);
+        event.SetInt(m_val);
+        ProcessWindowEvent(event);
+      }
+    }
+  }
+
+  void OnDoubleClick(wxMouseEvent &evt) {
+    if (m_val != m_default) {
+      m_val = m_default;
+      Refresh();
+      
+      wxCommandEvent event(wxEVT_SLIDER, GetId());
+      event.SetEventObject(this);
+      event.SetInt(m_val);
+      ProcessWindowEvent(event);
+    }
+  }
+};
+
+class LevelMeter : public wxWindow {
+public:
+  wxSize m_designSize;
+
+  LevelMeter(wxWindow *parent, wxWindowID id, bool stereo = false,
+             const wxSize &size = wxSize(14, 100))
+      : wxWindow(parent, id, wxDefaultPosition, size, wxBORDER_NONE),
+        m_stereo(stereo), m_leftVal(-960), m_rightVal(-960),
+        m_leftPeak(-960), m_rightPeak(-960) {
+    m_designSize = size;
+    if (m_designSize.x <= 0 || m_designSize.y <= 0) {
+      m_designSize = wxSize(14, 100);
+    }
+    SetBackgroundStyle(wxBG_STYLE_PAINT);
+    Bind(wxEVT_PAINT, &LevelMeter::OnPaint, this);
+  }
+
+  void SetValue(int val) {
+    m_leftVal = std::clamp(val, -960, 10);
+    if (m_leftVal > m_leftPeak) m_leftPeak = m_leftVal;
+    Refresh();
+  }
+
+  void SetValues(int left, int right) {
+    m_leftVal = std::clamp(left, -960, 10);
+    m_rightVal = std::clamp(right, -960, 10);
+    if (m_leftVal > m_leftPeak) m_leftPeak = m_leftVal;
+    if (m_rightVal > m_rightPeak) m_rightPeak = m_rightVal;
+    Refresh();
+  }
+
+  void ResetPeak() {
+    m_leftPeak = -960;
+    m_rightPeak = -960;
+    Refresh();
+  }
+
+  int GetLeftVal() const { return m_leftVal; }
+  int GetRightVal() const { return m_rightVal; }
+
+  void Rescale(double scale) {
+    SetMinSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+    SetMaxSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+  }
+
+private:
+  bool m_stereo;
+  int m_leftVal;
+  int m_rightVal;
+  int m_leftPeak;
+  int m_rightPeak;
+
+  void OnPaint(wxPaintEvent &evt) {
+    wxAutoBufferedPaintDC dc(this);
+    dc.Clear();
+    wxGraphicsContext *gc = wxGraphicsContext::Create(dc);
+    if (!gc) return;
+
+    gc->Scale(g_uiScale, g_uiScale);
+    wxSize sz = GetSize();
+    double dx = sz.x / g_uiScale;
+    double dy = sz.y / g_uiScale;
+    
+    gc->SetBrush(wxBrush(wxColour(30, 30, 30)));
+    gc->SetPen(*wxTRANSPARENT_PEN);
+    gc->DrawRectangle(0, 0, dx, dy);
+
+    int numBars = m_stereo ? 2 : 1;
+    double spacing = 1.0;
+    double barWidth = (dx - 2.0 - (numBars - 1) * spacing) / numBars;
+    
+    int vals[2] = { m_leftVal, m_rightVal };
+    int peaks[2] = { m_leftPeak, m_rightPeak };
+
+    for (int i = 0; i < numBars; ++i) {
+      double x = 1.0 + i * (barWidth + spacing);
+      double ySlot = 2.0;
+      double hSlot = dy - 4.0;
+
+      gc->SetBrush(wxBrush(wxColour(14, 14, 14)));
+      gc->DrawRectangle(x, ySlot, barWidth, hSlot);
+
+      double pct = (double)(vals[i] - (-960)) / (10 - (-960));
+      pct = std::clamp(pct, 0.0, 1.0);
+      double hBar = hSlot * pct;
+      double yBar = ySlot + hSlot - hBar;
+
+      if (hBar > 0) {
+        gc->SetBrush(wxBrush(wxColour(89, 155, 34)));
+        gc->DrawRectangle(x, yBar, barWidth, hBar);
+
+        double yellowDb = -120;
+        if (vals[i] > yellowDb) {
+          double pctY = (double)(yellowDb - (-960)) / (10 - (-960));
+          double yYellow = ySlot + hSlot - hSlot * pctY;
+          double hYellow = yYellow - yBar;
+          gc->SetBrush(wxBrush(wxColour(241, 196, 15)));
+          gc->DrawRectangle(x, yBar, barWidth, hYellow);
+        }
+
+        double redDb = -30;
+        if (vals[i] > redDb) {
+          double pctR = (double)(redDb - (-960)) / (10 - (-960));
+          double yRed = ySlot + hSlot - hSlot * pctR;
+          double hRed = yRed - yBar;
+          gc->SetBrush(wxBrush(wxColour(192, 57, 43)));
+          gc->DrawRectangle(x, yBar, barWidth, hRed);
+        }
+      }
+
+      double pctP = (double)(peaks[i] - (-960)) / (10 - (-960));
+      pctP = std::clamp(pctP, 0.0, 1.0);
+      double yPeak = ySlot + hSlot - hSlot * pctP;
+      gc->SetPen(wxPen(wxColour(255, 0, 0), 1));
+      gc->StrokeLine(x, yPeak, x + barWidth, yPeak);
+    }
+
+    delete gc;
+  }
+};
+
+class FaderStrip : public wxWindow {
+public:
+  wxSize m_designSize;
+
+  FaderStrip(wxWindow *parent, wxWindowID id, int minVal, int maxVal,
+             bool stereo = false, const wxSize &size = wxSize(45, 120))
+      : wxWindow(parent, id, wxDefaultPosition, size, wxBORDER_NONE),
+        m_val(0), m_min(minVal), m_max(maxVal), m_stereo(stereo),
+        m_leftVal(-960), m_rightVal(-960),
+        m_leftPeak(-960), m_rightPeak(-960),
+        m_isDragging(false) {
+    m_designSize = size;
+    if (m_designSize.x <= 0 || m_designSize.y <= 0) {
+      m_designSize = wxSize(45, 120);
+    }
+    SetBackgroundStyle(wxBG_STYLE_PAINT);
+    Bind(wxEVT_PAINT, &FaderStrip::OnPaint, this);
+    Bind(wxEVT_LEFT_DOWN, &FaderStrip::OnLeftDown, this);
+    Bind(wxEVT_LEFT_UP, &FaderStrip::OnLeftUp, this);
+    Bind(wxEVT_MOTION, &FaderStrip::OnMotion, this);
+    Bind(wxEVT_MOUSE_CAPTURE_LOST, &FaderStrip::OnMouseCaptureLost, this);
+  }
+
+  void SetValue(int val) {
+    val = std::clamp(val, m_min, m_max);
+    if (m_val != val) {
+      m_val = val;
+      Refresh();
+    }
+  }
+
+  int GetValue() const { return m_val; }
+
+  void SetMeterLevels(int left, int right) {
+    m_leftVal = std::clamp(left, -960, 10);
+    m_rightVal = std::clamp(right, -960, 10);
+    if (m_leftVal > m_leftPeak) m_leftPeak = m_leftVal;
+    if (m_rightVal > m_rightPeak) m_rightPeak = m_rightVal;
+    Refresh();
+  }
+
+  void ResetPeak() {
+    m_leftPeak = -960;
+    m_rightPeak = -960;
+    Refresh();
+  }
+
+  void Rescale(double scale) {
+    SetMinSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+    SetMaxSize(wxSize(m_designSize.x * scale, m_designSize.y * scale));
+  }
+
+private:
+  int m_val;
+  int m_min;
+  int m_max;
+  bool m_stereo;
+  int m_leftVal;
+  int m_rightVal;
+  int m_leftPeak;
+  int m_rightPeak;
+  bool m_isDragging;
+  int m_dragStartVal;
+  wxPoint m_dragStartPos;
+
+  double ValToY(int val, double hSlot, double ySlot) {
+    double pct = (double)(val - m_min) / (m_max - m_min);
+    pct = std::clamp(pct, 0.0, 1.0);
+    return ySlot + hSlot - hSlot * pct;
+  }
+
+  int YToVal(double y, double hSlot, double ySlot) {
+    double pct = (ySlot + hSlot - y) / hSlot;
+    pct = std::clamp(pct, 0.0, 1.0);
+    return m_min + std::round(pct * (m_max - m_min));
+  }
+
+  void OnPaint(wxPaintEvent &evt) {
+    wxAutoBufferedPaintDC dc(this);
+    dc.Clear();
+    wxGraphicsContext *gc = wxGraphicsContext::Create(dc);
+    if (!gc) return;
+
+    gc->Scale(g_uiScale, g_uiScale);
+    wxSize sz = GetSize();
+    double dx = sz.x / g_uiScale;
+    double dy = sz.y / g_uiScale;
+    
+    gc->SetBrush(wxBrush(wxColour(30, 30, 30)));
+    gc->SetPen(*wxTRANSPARENT_PEN);
+    gc->DrawRectangle(0, 0, dx, dy);
+
+    double meterWidth = 4.0;
+    double faderSlotWidth = 3.0;
+    double ySlot = 4.0;
+    double hSlot = dy - 8.0;
+
+    double xL = 2.0;
+    double xR = dx - 2.0 - meterWidth;
+    
+    // Center of fader track
+    double xCenter;
+    if (m_stereo) {
+      xCenter = dx / 2.0;
+    } else {
+      xCenter = (dx + meterWidth + 2.0) / 2.0;
+    }
+
+    // 1. Draw Level Meters
+    // Left Meter
+    gc->SetBrush(wxBrush(wxColour(12, 12, 12)));
+    gc->DrawRectangle(xL, ySlot, meterWidth, hSlot);
+    double pctL = (double)(m_leftVal - (-960)) / (10 - (-960));
+    pctL = std::clamp(pctL, 0.0, 1.0);
+    double hL = hSlot * pctL;
+    double yL = ySlot + hSlot - hL;
+    if (hL > 0) {
+      gc->SetBrush(wxBrush(wxColour(89, 155, 34)));
+      gc->DrawRectangle(xL, yL, meterWidth, hL);
+
+      double yellowDb = -120;
+      if (m_leftVal > yellowDb) {
+        double pctY = (double)(yellowDb - (-960)) / (10 - (-960));
+        double yYellow = ySlot + hSlot - hSlot * pctY;
+        double hYellow = yYellow - yL;
+        gc->SetBrush(wxBrush(wxColour(241, 196, 15)));
+        gc->DrawRectangle(xL, yL, meterWidth, hYellow);
+      }
+
+      double redDb = -30;
+      if (m_leftVal > redDb) {
+        double pctR = (double)(redDb - (-960)) / (10 - (-960));
+        double yRed = ySlot + hSlot - hSlot * pctR;
+        double hRed = yRed - yL;
+        gc->SetBrush(wxBrush(wxColour(192, 57, 43)));
+        gc->DrawRectangle(xL, yL, meterWidth, hRed);
+      }
+    }
+
+    // Right Meter (only if stereo)
+    if (m_stereo) {
+      gc->SetBrush(wxBrush(wxColour(12, 12, 12)));
+      gc->DrawRectangle(xR, ySlot, meterWidth, hSlot);
+      double pctR = (double)(m_rightVal - (-960)) / (10 - (-960));
+      pctR = std::clamp(pctR, 0.0, 1.0);
+      double hR = hSlot * pctR;
+      double yR = ySlot + hSlot - hR;
+      if (hR > 0) {
+        gc->SetBrush(wxBrush(wxColour(89, 155, 34)));
+        gc->DrawRectangle(xR, yR, meterWidth, hR);
+
+        double yellowDb = -120;
+        if (m_rightVal > yellowDb) {
+          double pctY = (double)(yellowDb - (-960)) / (10 - (-960));
+          double yYellow = ySlot + hSlot - hSlot * pctY;
+          double hYellow = yYellow - yR;
+          gc->SetBrush(wxBrush(wxColour(241, 196, 15)));
+          gc->DrawRectangle(xR, yR, meterWidth, hYellow);
+        }
+
+        double redDb = -30;
+        if (m_rightVal > redDb) {
+          double pctR = (double)(redDb - (-960)) / (10 - (-960));
+          double yRed = ySlot + hSlot - hSlot * pctR;
+          double hRed = yRed - yR;
+          gc->SetBrush(wxBrush(wxColour(192, 57, 43)));
+          gc->DrawRectangle(xR, yR, meterWidth, hRed);
+        }
+      }
+    }
+
+    // 2. Draw Fader Track
+    gc->SetBrush(wxBrush(wxColour(10, 10, 10)));
+    gc->DrawRectangle(xCenter - faderSlotWidth/2.0, ySlot, faderSlotWidth, hSlot);
+
+    // 3. Draw Ticks & Labels
+    gc->SetPen(wxPen(wxColour(70, 70, 70), 1));
+    for (int db : {0, -6, -12, -24, -36, -60}) {
+      if (db >= m_min && db <= m_max) {
+        double yTick = ValToY(db, hSlot, ySlot);
+        if (m_stereo) {
+          gc->StrokeLine(xCenter - 8, yTick, xCenter - 4, yTick);
+          gc->StrokeLine(xCenter + 4, yTick, xCenter + 8, yTick);
+        } else {
+          gc->StrokeLine(xCenter - 6, yTick, xCenter - 3, yTick);
+        }
+
+        wxFont font = GetFont();
+        font.SetPointSize(6);
+        gc->SetFont(font, wxColour(110, 110, 110));
+        wxString lbl = std::format("{}", db);
+        double tw, th, td, tel;
+        gc->GetTextExtent(lbl, &tw, &th, &td, &tel);
+        if (m_stereo) {
+          gc->DrawText(lbl, xCenter - 8 - tw, yTick - th/2.0);
+        } else {
+          gc->DrawText(lbl, xCenter + 5, yTick - th/2.0);
+        }
+      }
+    }
+
+    // 4. Draw Fader Cap (Handle)
+    double handleHeight = 12.0;
+    double handleWidth = m_stereo ? 18.0 : 16.0;
+    double yHandle = ValToY(m_val, hSlot, ySlot) - handleHeight / 2.0;
+    
+    gc->SetBrush(wxBrush(wxColour(245, 245, 245)));
+    gc->SetPen(wxPen(wxColour(90, 90, 90), 1));
+    gc->DrawRoundedRectangle(xCenter - handleWidth/2.0, yHandle, handleWidth, handleHeight, 1.5);
+
+    // Black line across the center of the handle
+    gc->SetPen(wxPen(wxColour(20, 20, 20), 1.5));
+    gc->StrokeLine(xCenter - handleWidth/2.0 + 1, yHandle + handleHeight/2.0, xCenter + handleWidth/2.0 - 1, yHandle + handleHeight/2.0);
+
+    // 5. Draw Peaks
+    double pctPL = (double)(m_leftPeak - (-960)) / (10 - (-960));
+    pctPL = std::clamp(pctPL, 0.0, 1.0);
+    gc->SetPen(wxPen(wxColour(255, 0, 0), 1));
+    gc->StrokeLine(xL, ySlot + hSlot - hSlot * pctPL, xL + meterWidth, ySlot + hSlot - hSlot * pctPL);
+
+    if (m_stereo) {
+      double pctPR = (double)(m_rightPeak - (-960)) / (10 - (-960));
+      pctPR = std::clamp(pctPR, 0.0, 1.0);
+      gc->StrokeLine(xR, ySlot + hSlot - hSlot * pctPR, xR + meterWidth, ySlot + hSlot - hSlot * pctPR);
+    }
+
+    delete gc;
+  }
+
+  void OnLeftDown(wxMouseEvent &evt) {
+    m_isDragging = true;
+    m_dragStartPos = evt.GetPosition();
+    m_dragStartVal = m_val;
+    CaptureMouse();
+    
+    double ySlot = 4.0;
+    double hSlot = GetSize().y - 8.0;
+    int newVal = YToVal(m_dragStartPos.y, hSlot, ySlot);
+    if (newVal != m_val) {
+      m_val = newVal;
+      m_dragStartVal = newVal;
+      Refresh();
+      SendScrollEvent();
+    }
+  }
+
+  void OnLeftUp(wxMouseEvent &evt) {
+    if (HasCapture()) {
+      ReleaseMouse();
+    }
+    m_isDragging = false;
+  }
+
+  void OnMouseCaptureLost(wxMouseCaptureLostEvent &evt) {
+    m_isDragging = false;
+    Refresh();
+  }
+
+  void OnMotion(wxMouseEvent &evt) {
+    if (m_isDragging) {
+      double ySlot = 4.0;
+      double hSlot = GetSize().y - 8.0;
+      wxPoint currPos = evt.GetPosition();
+      
+      int dy = currPos.y - m_dragStartPos.y;
+      double startY = ValToY(m_dragStartVal, hSlot, ySlot);
+      int newVal = YToVal(startY + dy, hSlot, ySlot);
+      
+      newVal = std::clamp(newVal, m_min, m_max);
+      if (newVal != m_val) {
+        m_val = newVal;
+        Refresh();
+        SendScrollEvent();
+      }
+    }
+  }
+
+  void SendScrollEvent() {
+    wxCommandEvent event(wxEVT_SLIDER, GetId());
+    event.SetEventObject(this);
+    event.SetInt(m_val);
+    ProcessWindowEvent(event);
+  }
+};
+
+// ----------------------------------------------------------------------------
+// Dialogs
+// ----------------------------------------------------------------------------
+
+class SettingsDialog : public wxDialog {
+public:
+  SettingsDialog(wxWindow *parent, uint16_t pid, ToppingHID *hid)
+      : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxSize(450, 350),
+                 wxDEFAULT_DIALOG_STYLE), m_hid(hid) {
+    SetBackgroundColour(wxColour(30, 30, 30));
+    SetForegroundColour(wxColour(220, 220, 220));
+
+    wxBoxSizer *mainSizer = new wxBoxSizer(wxVERTICAL);
+    wxBoxSizer *colsSizer = new wxBoxSizer(wxHORIZONTAL);
+
+    // Left Column: System settings
+    wxBoxSizer *leftCol = new wxBoxSizer(wxVERTICAL);
+    wxStaticText *lblSysTitle = new wxStaticText(this, wxID_ANY, "System settings");
+    lblSysTitle->SetFont(lblSysTitle->GetFont().Bold().Larger());
+    leftCol->Add(lblSysTitle, 0, wxALL, 5);
+
+    wxBoxSizer *langSizer = new wxBoxSizer(wxHORIZONTAL);
+    langSizer->Add(new wxStaticText(this, wxID_ANY, "Language:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+    wxChoice *choiceLang = new wxChoice(this, wxID_ANY);
+    choiceLang->Append("English");
+    choiceLang->SetSelection(0);
+    langSizer->Add(choiceLang, 1, wxEXPAND);
+    leftCol->Add(langSizer, 0, wxALL | wxEXPAND, 5);
+
+    wxBoxSizer *scaleSizer = new wxBoxSizer(wxHORIZONTAL);
+    scaleSizer->Add(new wxStaticText(this, wxID_ANY, "UI Scaling:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+    wxChoice *choiceScale = new wxChoice(this, wxID_ANY);
+    choiceScale->Append("100%");
+    choiceScale->SetSelection(0);
+    scaleSizer->Add(choiceScale, 1, wxEXPAND);
+    leftCol->Add(scaleSizer, 0, wxALL | wxEXPAND, 5);
+
+    leftCol->Add(new wxStaticText(this, wxID_ANY, "Workspace storage:"), 0, wxTOP | wxLEFT, 5);
+    wxBoxSizer *dirSizer = new wxBoxSizer(wxHORIZONTAL);
+    wxStaticText *lblDir = new wxStaticText(this, wxID_ANY, "~/.config/topping...");
+    lblDir->SetForegroundColour(wxColour(140, 140, 140));
+    dirSizer->Add(lblDir, 1, wxALIGN_CENTER_VERTICAL);
+    wxButton *btnChangeDir = new wxButton(this, wxID_ANY, "Change", wxDefaultPosition, wxSize(55, 20));
+    dirSizer->Add(btnChangeDir, 0, wxLEFT, 5);
+    leftCol->Add(dirSizer, 0, wxALL | wxEXPAND, 5);
+
+    cbSaveWorkspace = new wxCheckBox(this, wxID_ANY, "Auto save workspace");
+    cbSaveWorkspace->SetValue(true);
+    leftCol->Add(cbSaveWorkspace, 0, wxALL, 5);
+
+    cbStartup = new wxCheckBox(this, wxID_ANY, "Auto run upon startup");
+    cbStartup->SetValue(true);
+    leftCol->Add(cbStartup, 0, wxALL, 5);
+
+    cbUpdates = new wxCheckBox(this, wxID_ANY, "Auto check updates");
+    cbUpdates->SetValue(true);
+    leftCol->Add(cbUpdates, 0, wxALL, 5);
+
+    colsSizer->Add(leftCol, 1, wxALL | wxEXPAND, 8);
+
+    wxStaticLine *divLine = new wxStaticLine(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_VERTICAL);
+    colsSizer->Add(divLine, 0, wxEXPAND | wxTOP | wxBOTTOM, 8);
+
+    // Right Column: Device settings
+    wxBoxSizer *rightCol = new wxBoxSizer(wxVERTICAL);
+    wxStaticText *lblDevTitle = new wxStaticText(this, wxID_ANY, "Device settings");
+    lblDevTitle->SetFont(lblDevTitle->GetFont().Bold().Larger());
+    rightCol->Add(lblDevTitle, 0, wxALL, 5);
+
+    wxBoxSizer *brightSizer = new wxBoxSizer(wxHORIZONTAL);
+    brightSizer->Add(new wxStaticText(this, wxID_ANY, "Brightness:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+    choiceBrightness = new wxChoice(this, wxID_ANY);
+    choiceBrightness->Append("Low");
+    choiceBrightness->Append("Normal");
+    choiceBrightness->Append("High");
+    
+    int brightVal = m_hid->settings.contains(0x100a) ? m_hid->settings[0x100a] : 1;
+    choiceBrightness->SetSelection(std::clamp(brightVal, 0, 2));
+    brightSizer->Add(choiceBrightness, 1, wxEXPAND);
+    rightCol->Add(brightSizer, 0, wxALL | wxEXPAND, 5);
+
+    cbAutoStandby = new wxCheckBox(this, wxID_ANY, "Automatic standby");
+    int standbyVal = 1;
+    if (pid == 0x8754) {
+      standbyVal = m_hid->settings.contains(0x3901) ? m_hid->settings[0x3901] : 1;
+    } else {
+      standbyVal = m_hid->settings.contains(0x1101) ? m_hid->settings[0x1101] : 1;
+    }
+    cbAutoStandby->SetValue(standbyVal ? true : false);
+    rightCol->Add(cbAutoStandby, 0, wxALL, 5);
+
+    bool isOTG = (pid == 0x8755 || pid == 0x8756);
+    if (isOTG) {
+      cbOTGMode = new wxCheckBox(this, wxID_ANY, "Mobile applications");
+      int otgVal = m_hid->settings.contains(0x1103) ? m_hid->settings[0x1103] : 1;
+      cbOTGMode->SetValue(otgVal ? true : false);
+      rightCol->Add(cbOTGMode, 0, wxALL, 5);
+    } else if (pid == 0x8754) {
+      cbOTGMode = new wxCheckBox(this, wxID_ANY, "Mobile applications");
+      int otgVal = m_hid->settings.contains(0x3a01) ? m_hid->settings[0x3a01] : 1;
+      cbOTGMode->SetValue(otgVal ? true : false);
+      rightCol->Add(cbOTGMode, 0, wxALL, 5);
+    } else {
+      cbOTGMode = nullptr;
+    }
+
+    colsSizer->Add(rightCol, 1, wxALL | wxEXPAND, 8);
+    mainSizer->Add(colsSizer, 0, wxEXPAND);
+
+    mainSizer->Add(new wxStaticLine(this, wxID_ANY), 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
+
+    // Version details
+    wxBoxSizer *verSizer = new wxBoxSizer(wxVERTICAL);
+    wxStaticText *lblVerTitle = new wxStaticText(this, wxID_ANY, "Version information");
+    lblVerTitle->SetFont(lblVerTitle->GetFont().Bold());
+    verSizer->Add(lblVerTitle, 0, wxALL, 4);
+
+    wxString deviceName = "E2x2 OTG";
+    if (pid == 0x8754) deviceName = "E4x4";
+    else if (pid == 0x8755) deviceName = "E1x2 OTG";
+    else if (pid == 0x8752) deviceName = "E2x2";
+
+    verSizer->Add(new wxStaticText(this, wxID_ANY, "Device model: " + deviceName), 0, wxLEFT | wxBOTTOM, 2);
+    verSizer->Add(new wxStaticText(this, wxID_ANY, "Device hardware version: V1.01"), 0, wxLEFT | wxBOTTOM, 2);
+    verSizer->Add(new wxStaticText(this, wxID_ANY, "Device software version: V1.07"), 0, wxLEFT | wxBOTTOM, 2);
+    verSizer->Add(new wxStaticText(this, wxID_ANY, "TOPPING Control Center version: V1.08"), 0, wxLEFT | wxBOTTOM, 4);
+
+    wxBoxSizer *btnSizer = new wxBoxSizer(wxHORIZONTAL);
+    wxButton *btnCheck = new wxButton(this, wxID_ANY, "Check for updates", wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    btnCheck->SetBackgroundColour(wxColour(50, 50, 50));
+    btnCheck->SetForegroundColour(*wxWHITE);
+    wxButton *btnWeb = new wxButton(this, wxID_ANY, "Official website", wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    btnWeb->SetBackgroundColour(wxColour(50, 50, 50));
+    btnWeb->SetForegroundColour(*wxWHITE);
+    
+    btnSizer->Add(btnCheck, 0, wxRIGHT, 8);
+    btnSizer->Add(btnWeb, 0);
+    verSizer->Add(btnSizer, 0, wxLEFT | wxTOP, 3);
+
+    mainSizer->Add(verSizer, 1, wxALL | wxEXPAND, 8);
+
+    wxBoxSizer *okCancelSizer = new wxBoxSizer(wxHORIZONTAL);
+    wxButton *btnOK = new wxButton(this, wxID_OK, "OK");
+    okCancelSizer->Add(btnOK, 0, wxALL, 8);
+    mainSizer->Add(okCancelSizer, 0, wxALIGN_RIGHT);
+
+    SetSizer(mainSizer);
+    Layout();
+
+    choiceBrightness->Bind(wxEVT_CHOICE, &SettingsDialog::OnDeviceChange, this);
+    cbAutoStandby->Bind(wxEVT_CHECKBOX, &SettingsDialog::OnDeviceChange, this);
+    if (cbOTGMode) {
+      cbOTGMode->Bind(wxEVT_CHECKBOX, &SettingsDialog::OnDeviceChange, this);
+    }
+  }
+
+  wxCheckBox *cbAutoStandby;
+  wxCheckBox *cbOTGMode;
+  wxChoice *choiceBrightness;
+
+private:
+  ToppingHID *m_hid;
+  wxCheckBox *cbSaveWorkspace;
+  wxCheckBox *cbStartup;
+  wxCheckBox *cbUpdates;
+
+  void OnDeviceChange(wxCommandEvent &evt) {
+    if (NULL == m_hid->getHandle()) return;
+    
+    int sel = choiceBrightness->GetSelection();
+    if (sel != wxNOT_FOUND) {
+      m_hid->setDeviceSetting(0x10, 0x0a, sel);
+      m_hid->settings[0x100a] = sel;
+    }
+    
+    bool val = cbAutoStandby->GetValue();
+    int val32 = val ? 1 : 0;
+    if (m_hid->pid == 0x8754) {
+      m_hid->setDeviceSetting(0x39, 0x01, val32);
+      m_hid->settings[0x3901] = val32;
+    } else {
+      m_hid->setDeviceSetting(0x11, 0x01, val32);
+      m_hid->settings[0x1101] = val32;
+    }
+
+    if (cbOTGMode) {
+      bool otgVal = cbOTGMode->GetValue();
+      int otgVal32 = otgVal ? 1 : 0;
+      if (m_hid->pid == 0x8754) {
+        m_hid->setDeviceSetting(0x3a, 0x01, otgVal32);
+        m_hid->settings[0x3a01] = otgVal32;
+      } else {
+        m_hid->setDeviceSetting(0x11, 0x03, otgVal32);
+        m_hid->settings[0x1103] = otgVal32;
+      }
+    }
+  }
+};
+
+class DownloadDialog : public wxDialog {
+public:
+  DownloadDialog(wxWindow *parent)
+      : wxDialog(parent, wxID_ANY, "Download", wxDefaultPosition, wxSize(380, 180),
+                 wxDEFAULT_DIALOG_STYLE) {
+    SetBackgroundColour(wxColour(30, 30, 30));
+    SetForegroundColour(wxColour(220, 220, 220));
+
+    wxBoxSizer *mainSizer = new wxBoxSizer(wxVERTICAL);
+    mainSizer->Add(new wxStaticText(this, wxID_ANY, ""), 0, wxTOP, 10);
+
+    rbOption1 = new wxRadioButton(this, wxID_ANY, "Save current workspace and download to device", wxDefaultPosition, wxDefaultSize, wxRB_GROUP);
+    rbOption2 = new wxRadioButton(this, wxID_ANY, "Save as workspace and download to device");
+    rbOption3 = new wxRadioButton(this, wxID_ANY, "Download to device only");
+
+    rbOption1->SetForegroundColour(*wxWHITE);
+    rbOption2->SetForegroundColour(*wxWHITE);
+    rbOption3->SetForegroundColour(*wxWHITE);
+
+    mainSizer->Add(rbOption1, 0, wxALL, 6);
+    mainSizer->Add(rbOption2, 0, wxALL, 6);
+    mainSizer->Add(rbOption3, 0, wxALL, 6);
+
+    wxBoxSizer *btnSizer = new wxBoxSizer(wxHORIZONTAL);
+    wxButton *btnCancel = new wxButton(this, wxID_CANCEL, "Cancel", wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    btnCancel->SetBackgroundColour(wxColour(45, 45, 45));
+    btnCancel->SetForegroundColour(*wxWHITE);
+    
+    wxButton *btnOK = new wxButton(this, wxID_OK, "OK", wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    btnOK->SetBackgroundColour(wxColour(55, 55, 55));
+    btnOK->SetForegroundColour(*wxWHITE);
+
+    btnSizer->Add(btnCancel, 0, wxRIGHT, 10);
+    btnSizer->Add(btnOK, 0);
+
+    mainSizer->Add(btnSizer, 0, wxALIGN_RIGHT | wxALL, 10);
+
+    SetSizer(mainSizer);
+    Layout();
+  }
+
+  wxRadioButton *rbOption1;
+  wxRadioButton *rbOption2;
+  wxRadioButton *rbOption3;
+};
+
+// ----------------------------------------------------------------------------
+// Panels Redesign
+// ----------------------------------------------------------------------------
 
 class PanelInputs : public wxPanel {
 public:
   const static int32_t N_INPUTS = 4;
   int32_t activeInputs;
-  // Unit is 0.1dB
   const static int32_t LEVEL_MIN = -960;
   const static int32_t LEVEL_MAX = 10;
-  // const static double LEVEL_UNIT = 0.1;
   const static int32_t LEVEL_RANGE = LEVEL_MAX - LEVEL_MIN;
-
   const static int32_t minGain = -60;
-  const static int32_t maxGain = 30; // for the int32_t ,  NEVER exceed 36!
+  const static int32_t maxGain = 30;
 
   wxStaticText *lbTitleI[N_INPUTS];
-  wxStaticText *lbGainI[N_INPUTS];
-  wxSlider *slGainI[N_INPUTS];
-  wxGauge *gaLevels[N_INPUTS];
+  CustomButton *lbPeaksI[N_INPUTS];
+  wxStaticText *lbGainVal[N_INPUTS];
+  
+  FaderStrip *slGainI[N_INPUTS]; 
+  FaderStrip *slGainICombined; 
+  CustomButton *btnLink; 
+  KnobControl *slPanI[N_INPUTS]; 
 
-  wxToggleButton *cb48V[N_INPUTS];
-  wxToggleButton *cbMon[N_INPUTS];
-  wxToggleButton *cbInst[N_INPUTS];
-  wxToggleButton *cbSolo[N_INPUTS];
-  wxToggleButton *cbMute[N_INPUTS];
-  wxToggleButton *cbPhase[N_INPUTS];
-  wxButton *lbPeaksI[N_INPUTS];
+  CustomButton *cb48V[N_INPUTS];
+  CustomButton *cbMon[N_INPUTS];
+  CustomButton *cbInst[N_INPUTS];
+  CustomButton *cbSolo[N_INPUTS];
+  CustomButton *cbMute[N_INPUTS];
+  CustomButton *cbPhase[N_INPUTS];
+
+  // Split buttons for channel 3+4
+  CustomButton *cbSoloL;
+  CustomButton *cbSoloR;
+  CustomButton *cbMuteL;
+  CustomButton *cbMuteR;
+  CustomButton *cbPhaseL;
+  CustomButton *cbPhaseR;
+
+  wxBoxSizer *combBtnSizer;
+  wxBoxSizer *splitBtnSizer;
+
   int32_t PeaksI[N_INPUTS];
+  int32_t inLevelVal[N_INPUTS];
 
   PanelInputs(wxWindow *parent, int32_t activeInputs = 4, uint16_t pid = 0x8754)
       : wxPanel(parent, wxID_ANY), activeInputs(activeInputs) {
-    const auto MARGIN = FromDIP(8);
-
+    SetBackgroundColour(wxColour(33, 33, 33));
+    Bind(wxEVT_PAINT, [this](wxPaintEvent &evt) {
+      wxPaintDC dc(this);
+      dc.SetBackground(wxBrush(wxColour(33, 33, 33)));
+      dc.Clear();
+    });
+    
+    // Safety null initializations
     for (size_t i = 0; i < N_INPUTS; i++) {
-      PeaksI[i] = LEVEL_MIN;
+      lbTitleI[i] = nullptr;
+      lbPeaksI[i] = nullptr;
+      lbGainVal[i] = nullptr;
+      slGainI[i] = nullptr;
+      slPanI[i] = nullptr;
+      cb48V[i] = nullptr;
+      cbMon[i] = nullptr;
       cbInst[i] = nullptr;
+      cbSolo[i] = nullptr;
+      cbMute[i] = nullptr;
+      cbPhase[i] = nullptr;
     }
-    // 3 columns per channel, control, gain, level
-    auto sizer = new wxGridBagSizer(MARGIN, MARGIN);
+    slGainICombined = nullptr;
+    btnLink = nullptr;
+    cbSoloL = cbSoloR = cbMuteL = cbMuteR = cbPhaseL = cbPhaseR = nullptr;
+    combBtnSizer = splitBtnSizer = nullptr;
 
-    // titles
-    for (size_t iCh = 0; iCh < N_INPUTS; iCh++) {
-      lbTitleI[iCh] =
-          new wxStaticText(this, wxID_ANY, std::format("Input{}", iCh + 1));
-      lbTitleI[iCh]->SetWindowStyle(wxALIGN_CENTER);
-      wxFont font = lbTitleI[iCh]->GetFont();
-      lbTitleI[iCh]->SetFont(font.Larger().Larger());
+    wxBoxSizer *mainSizer = new wxBoxSizer(wxVERTICAL);
+    
+    // Top Panel Title
+    wxBoxSizer *titleRow = new wxBoxSizer(wxHORIZONTAL);
+    wxStaticText *lblTitle = new wxStaticText(this, wxID_ANY, "Input");
+    lblTitle->SetFont(lblTitle->GetFont().Bold().Larger());
+    lblTitle->SetForegroundColour(*wxWHITE);
+    titleRow->Add(lblTitle, 0, wxLEFT | wxTOP, 6);
+    
+    wxStaticText *lblBar = new wxStaticText(this, wxID_ANY, "  |");
+    lblBar->SetFont(lblBar->GetFont().Bold().Larger());
+    lblBar->SetForegroundColour(wxColour(80, 80, 80));
+    titleRow->Add(lblBar, 0, wxTOP, 6);
+    
+    mainSizer->Add(titleRow, 0, wxBOTTOM, 4);
 
-      if (iCh < activeInputs) {
-        sizer->Add(lbTitleI[iCh], wxGBPosition(0, iCh * 3), wxGBSpan(1, 3),
-                   wxALIGN_CENTER);
+    wxBoxSizer *colsSizer = new wxBoxSizer(wxHORIZONTAL);
+
+    int numCols = 0;
+    if (pid == 0x8754) numCols = 3; 
+    else if (pid == 0x8752 || pid == 0x8756) numCols = 2; 
+    else numCols = 1; 
+
+    for (int col = 0; col < numCols; ++col) {
+      wxPanel *colPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, "colPanel");
+      colPanel->SetBackgroundColour(wxColour(25, 25, 25));
+      colPanel->Bind(wxEVT_PAINT, [colPanel](wxPaintEvent &evt) {
+        wxPaintDC dc(colPanel);
+        dc.SetBackground(wxBrush(wxColour(25, 25, 25)));
+        dc.Clear();
+      });
+      wxBoxSizer *colSizer = new wxBoxSizer(wxVERTICAL);
+      
+      wxString colName;
+      if (col == 0) colName = "IN 1";
+      else if (col == 1) colName = "IN 2";
+      else colName = "Disconnected"; 
+      
+      lbTitleI[col] = new wxStaticText(colPanel, wxID_ANY, colName, wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbTitleI[col]->SetFont(lbTitleI[col]->GetFont().Bold());
+      lbTitleI[col]->SetForegroundColour(wxColour(180, 180, 180));
+      colSizer->Add(lbTitleI[col], 0, wxALIGN_CENTER | wxTOP, 4);
+      
+      PeaksI[col] = LEVEL_MIN;
+      inLevelVal[col] = LEVEL_MIN;
+      if (col == 2) inLevelVal[3] = LEVEL_MIN; 
+      
+      // Gain display label
+      lbGainVal[col] = new wxStaticText(colPanel, wxID_ANY, "-60 dB", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbGainVal[col]->SetForegroundColour(wxColour(220, 220, 220));
+      lbGainVal[col]->SetFont(lbGainVal[col]->GetFont().Smaller());
+      colSizer->Add(lbGainVal[col], 0, wxALIGN_CENTER | wxTOP, 2);
+      
+      // Middle Part (Fader(s) & Buttons)
+      wxBoxSizer *midSizer = new wxBoxSizer(wxHORIZONTAL);
+      wxBoxSizer *faderSizer = new wxBoxSizer(wxHORIZONTAL);
+      
+      if (col < 2) {
+        slGainI[col] = new FaderStrip(colPanel, ID_INPUT_GAIN + col, minGain, maxGain, false, wxSize(40, 110));
+        faderSizer->Add(slGainI[col], 1, wxEXPAND);
       } else {
-        lbTitleI[iCh]->Hide();
+        // Stereo channel IN 3+4
+        slGainI[2] = new FaderStrip(colPanel, ID_INPUT_GAIN + 2, minGain, maxGain, false, wxSize(32, 110));
+        slGainI[3] = new FaderStrip(colPanel, ID_INPUT_GAIN + 3, minGain, maxGain, false, wxSize(32, 110));
+        slGainICombined = new FaderStrip(colPanel, ID_INPUT_GAIN + 2, minGain, maxGain, true, wxSize(50, 110));
+        
+        faderSizer->Add(slGainI[2], 1, wxEXPAND);
+        faderSizer->Add(slGainI[3], 1, wxEXPAND);
+        faderSizer->Add(slGainICombined, 1, wxEXPAND);
+        
+        slGainI[2]->Hide();
+        slGainI[3]->Hide();
       }
+      
+      midSizer->Add(faderSizer, 1, wxEXPAND | wxLEFT | wxRIGHT, 4);
+      
+      wxBoxSizer *btnCol = new wxBoxSizer(wxVERTICAL);
+      
+      if (col < 2) {
+        cbMon[col] = new CustomButton(colPanel, ID_INPUT_MON + col, "MON", true, wxSize(36, 15), wxColour(89, 155, 34));
+        cb48V[col] = new CustomButton(colPanel, ID_INPUT_48V + col, "48V", true, wxSize(36, 15), wxColour(192, 57, 43));
+        cbInst[col] = new CustomButton(colPanel, ID_INPUT_INST + col, "INST", true, wxSize(36, 15), wxColour(89, 155, 34));
+        cbSolo[col] = new CustomButton(colPanel, ID_INPUT_SOLO + col, "SOLO", true, wxSize(36, 15), wxColour(241, 196, 15));
+        cbMute[col] = new CustomButton(colPanel, ID_INPUT_MUTE + col, "MUTE", true, wxSize(36, 15), wxColour(192, 57, 43));
+        cbPhase[col] = new CustomButton(colPanel, ID_INPUT_PHASE + col, "Ø", true, wxSize(36, 15), wxColour(89, 155, 34));
+
+        btnCol->Add(cbMon[col], 0, wxBOTTOM, 1);
+        btnCol->Add(cb48V[col], 0, wxBOTTOM, 1);
+        btnCol->Add(cbInst[col], 0, wxBOTTOM, 1);
+        btnCol->Add(cbSolo[col], 0, wxBOTTOM, 1);
+        btnCol->Add(cbMute[col], 0, wxBOTTOM, 1);
+        btnCol->Add(cbPhase[col], 0, wxBOTTOM, 1);
+      } else {
+        btnLink = new CustomButton(colPanel, ID_INPUT_LINK, "Link", true, wxSize(36, 15), wxColour(29, 115, 201));
+        btnLink->SetValue(true);
+        btnCol->Add(btnLink, 0, wxBOTTOM, 4);
+
+        // Combined Buttons Container
+        combBtnSizer = new wxBoxSizer(wxVERTICAL);
+        cbSolo[col] = new CustomButton(colPanel, ID_INPUT_SOLO + 2, "SOLO", true, wxSize(36, 15), wxColour(241, 196, 15));
+        cbMute[col] = new CustomButton(colPanel, ID_INPUT_MUTE + 2, "MUTE", true, wxSize(36, 15), wxColour(192, 57, 43));
+        cbPhase[col] = new CustomButton(colPanel, ID_INPUT_PHASE + 2, "Ø", true, wxSize(36, 15), wxColour(89, 155, 34));
+        combBtnSizer->Add(cbSolo[col], 0, wxBOTTOM, 4);
+        combBtnSizer->Add(cbMute[col], 0, wxBOTTOM, 4);
+        combBtnSizer->Add(cbPhase[col], 0, wxBOTTOM, 4);
+        btnCol->Add(combBtnSizer, 0, wxEXPAND);
+
+        // Split Buttons Container
+        splitBtnSizer = new wxBoxSizer(wxHORIZONTAL);
+        
+        wxBoxSizer *leftBtnCol = new wxBoxSizer(wxVERTICAL);
+        cbSoloL = new CustomButton(colPanel, ID_INPUT_SOLO + 2, "SOLO", true, wxSize(18, 15), wxColour(241, 196, 15));
+        cbMuteL = new CustomButton(colPanel, ID_INPUT_MUTE + 2, "MUTE", true, wxSize(18, 15), wxColour(192, 57, 43));
+        cbPhaseL = new CustomButton(colPanel, ID_INPUT_PHASE + 2, "Ø", true, wxSize(18, 15), wxColour(89, 155, 34));
+        leftBtnCol->Add(cbSoloL, 0, wxBOTTOM, 4);
+        leftBtnCol->Add(cbMuteL, 0, wxBOTTOM, 4);
+        leftBtnCol->Add(cbPhaseL, 0, wxBOTTOM, 4);
+        
+        wxBoxSizer *rightBtnCol = new wxBoxSizer(wxVERTICAL);
+        cbSoloR = new CustomButton(colPanel, ID_INPUT_SOLO + 3, "SOLO", true, wxSize(18, 15), wxColour(241, 196, 15));
+        cbMuteR = new CustomButton(colPanel, ID_INPUT_MUTE + 3, "MUTE", true, wxSize(18, 15), wxColour(192, 57, 43));
+        cbPhaseR = new CustomButton(colPanel, ID_INPUT_PHASE + 3, "Ø", true, wxSize(18, 15), wxColour(89, 155, 34));
+        rightBtnCol->Add(cbSoloR, 0, wxBOTTOM, 4);
+        rightBtnCol->Add(cbMuteR, 0, wxBOTTOM, 4);
+        rightBtnCol->Add(cbPhaseR, 0, wxBOTTOM, 4);
+
+        splitBtnSizer->Add(leftBtnCol, 1, wxEXPAND | wxRIGHT, 1);
+        splitBtnSizer->Add(rightBtnCol, 1, wxEXPAND | wxLEFT, 1);
+        
+        btnCol->Add(splitBtnSizer, 0, wxEXPAND);
+        splitBtnSizer->Show(false); 
+      }
+      
+      midSizer->Add(btnCol, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+      colSizer->Add(midSizer, 1, wxEXPAND | wxTOP, 4);
+      
+      // Peak Reset Button
+      lbPeaksI[col] = new CustomButton(colPanel, ID_INPUT_PEAK + col, "-120.0", false, wxSize(45, 14), wxColour(50, 50, 50));
+      lbPeaksI[col]->SetFont(lbPeaksI[col]->GetFont().Smaller());
+      colSizer->Add(lbPeaksI[col], 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, 2);
+      
+      // Bottom Panning Knob
+      slPanI[col] = new KnobControl(colPanel, wxID_ANY, "Pan", -100, 100, 0, wxSize(35, 42));
+      colSizer->Add(slPanI[col], 0, wxALIGN_CENTER | wxBOTTOM, 2);
+      
+      colPanel->SetSizer(colSizer);
+      colPanel->SetMinSize(wxSize(120, -1));
+      colsSizer->Add(colPanel, 0, wxEXPAND | wxALL, 2);
     }
-    // peak level, with reset
-    for (size_t iCh = 0; iCh < N_INPUTS; iCh++) {
-      lbPeaksI[iCh] = new wxButton(this, ID_INPUT_PEAK + iCh, "-120.0",
-                                   wxDefaultPosition, wxSize(40, 20));
-      lbPeaksI[iCh]->SetWindowStyle(wxBU_RIGHT | wxALIGN_RIGHT | wxBORDER_NONE);
-
-      lbPeaksI[iCh]->SetSize(wxSize(40, 20));
-      // lbPeaksI[iCh]->SetHint("Peal level\nClick to reset");
-
-      lbGainI[iCh] = new wxStaticText(this, wxID_ANY, wxString("0 dB"));
-      lbPeaksI[iCh]->SetWindowStyle(wxALIGN_RIGHT);
-      if (iCh < activeInputs) {
-        sizer->Add(lbPeaksI[iCh], wxGBPosition(1, iCh * 3), wxGBSpan(1, 1),
-                   wxALIGN_CENTER);
-        if (pid == 0x8754) {
-          sizer->Add(lbGainI[iCh], wxGBPosition(1, iCh * 3 + 1), wxGBSpan(1, 1),
-                     wxALIGN_CENTER);
-        } else {
-          lbGainI[iCh]->Hide();
-        }
-      } else {
-        lbPeaksI[iCh]->Hide();
-        lbGainI[iCh]->Hide();
-      }
-    }
-    for (size_t i = 0; i < N_INPUTS; i++) {
-      gaLevels[i] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition,
-                                wxSize(24, 100), wxGA_VERTICAL);
-      gaLevels[i]->SetValue(0);
-
-      slGainI[i] = new wxSlider(this, ID_INPUT_GAIN + i, 0, minGain, maxGain,
-                                wxDefaultPosition, wxDefaultSize,
-                                wxSL_VERTICAL | wxSL_LABELS | wxSL_INVERSE);
-      slGainI[i]->SetPageSize(5);
-      slGainI[i]->SetTickFreq(5);
-
-      auto buttonPanel = new wxPanel(this, wxID_ANY);
-      auto sizerButtons = new wxGridSizer(7, 1, 10, 10);
-      buttonPanel->SetSizer(sizerButtons);
-
-      sizerButtons->Add(
-          cb48V[i] = new wxToggleButton(buttonPanel, ID_INPUT_48V + i, "48V"),
-          wxEXPAND);
-      sizerButtons->Add(new wxStaticText(buttonPanel, wxID_ANY, ""),
-                        wxEXPAND); // spacer
-      sizerButtons->Add(
-          cbMon[i] = new wxToggleButton(buttonPanel, ID_INPUT_MON + i, "MON"),
-          wxEXPAND);
-      if (i < 2) {
-        sizerButtons->Add(cbInst[i] = new wxToggleButton(
-                              buttonPanel, ID_INPUT_INST + i, "INST"),
-                          wxEXPAND);
-      } else {
-        sizerButtons->Add(new wxStaticText(buttonPanel, wxID_ANY, ""),
-                          wxEXPAND); // spacer
-      }
-
-      cbSolo[i] = new wxToggleButton(buttonPanel, ID_INPUT_SOLO + i, "SOLO");
-      cbMute[i] = new wxToggleButton(buttonPanel, ID_INPUT_MUTE + i, "MUTE");
-      cbPhase[i] = new wxToggleButton(buttonPanel, ID_INPUT_PHASE + i, "PHASE");
-
-      if (pid == 0x8754) {
-        sizerButtons->Add(cbSolo[i], wxEXPAND);
-        sizerButtons->Add(cbMute[i], wxEXPAND);
-        sizerButtons->Add(cbPhase[i], wxEXPAND);
-      } else {
-        cbSolo[i]->Hide();
-        cbMute[i]->Hide();
-        cbPhase[i]->Hide();
-      }
-
-      if (i < activeInputs) {
-        sizer->Add(gaLevels[i], wxGBPosition(2, i * 3), wxGBSpan(1, 1),
-                   wxEXPAND);
-        if (pid == 0x8754) {
-          sizer->Add(slGainI[i], wxGBPosition(2, i * 3 + 1), wxGBSpan(1, 1),
-                     wxEXPAND);
-        } else {
-          slGainI[i]->Hide();
-        }
-        sizer->Add(buttonPanel, wxGBPosition(2, i * 3 + 2), wxGBSpan(1, 1),
-                   wxALIGN_TOP);
-      } else {
-        gaLevels[i]->Hide();
-        slGainI[i]->Hide();
-        buttonPanel->Hide();
-      }
-    }
-    sizer->SetMinSize(500, 300);
-    sizer->AddGrowableRow(2, 1);
-    SetSizer(sizer);
-  };
-}; // PanelInputs
+    colsSizer->AddStretchSpacer(1);
+    mainSizer->Add(colsSizer, 1, wxEXPAND);
+    int panelWidth = (numCols == 1) ? 128 : ((numCols == 2) ? 248 : 368);
+    SetMinSize(wxSize(panelWidth, -1));
+    SetMaxSize(wxSize(panelWidth, -1));
+    SetSizer(mainSizer);
+  }
+};
 
 class PanelMixers : public wxPanel {
 public:
   const static int32_t N_MIXERS = 4;
   const static int32_t N_MIX_SRCS = 12;
-  wxRadioBox *rboxMixerSelBox;
+
+  wxPanel *tabBar;
+  CustomButton *tabButtons[N_MIXERS];
 
   wxStaticText *lbTitle[N_MIX_SRCS / 2];
-  wxButton *btPeaks[N_MIX_SRCS];
-  wxGauge *gaLevel[N_MIX_SRCS];
-  wxSlider *slPan[N_MIX_SRCS];
-  wxSlider *slVol[N_MIX_SRCS];
-  wxSlider *slVolB[N_MIX_SRCS / 2];
-  wxToggleButton *ckMute[N_MIX_SRCS];
-  wxToggleButton *ckSolo[N_MIX_SRCS];
-  wxToggleButton *ckPhase[N_MIX_SRCS];
+  wxStaticText *lbVolVal[N_MIX_SRCS / 2];
+  KnobControl *slPan[N_MIX_SRCS]; 
+  
+  FaderStrip *slVol[N_MIX_SRCS / 2]; 
+  FaderStrip *slVolL[N_MIX_SRCS / 2]; 
+  FaderStrip *slVolR[N_MIX_SRCS / 2]; 
+  CustomButton *btnLink[N_MIX_SRCS / 2]; 
+
+  // Combined Buttons
+  CustomButton *ckMute[N_MIX_SRCS / 2];
+  CustomButton *ckSolo[N_MIX_SRCS / 2];
+  CustomButton *ckPhaseCombined[N_MIX_SRCS / 2];
+
+  // Split Buttons
+  CustomButton *ckMuteL[N_MIX_SRCS / 2];
+  CustomButton *ckMuteR[N_MIX_SRCS / 2];
+  CustomButton *ckSoloL[N_MIX_SRCS / 2];
+  CustomButton *ckSoloR[N_MIX_SRCS / 2];
+  CustomButton *ckPhase[N_MIX_SRCS]; 
+
+  wxBoxSizer *combBtnSizer[N_MIX_SRCS / 2];
+  wxBoxSizer *splitBtnSizer[N_MIX_SRCS / 2];
 
   int32_t PeaksI[N_MIX_SRCS];
+  int32_t mixLevelVal[N_MIX_SRCS];
 
   const static int32_t LEVEL_MIN = -960;
   const static int32_t LEVEL_MAX = 10;
-  // const static double LEVEL_UNIT = 0.1;
   const static int32_t LEVEL_RANGE = LEVEL_MAX - LEVEL_MIN;
   const static int32_t minGain = -60;
-  const static int32_t maxGain = 6; // for the int32_t ,  NEVER exceed 36!
+  const static int32_t maxGain = 6;
 
-  const wxString MixSels[N_MIXERS] = {
-      wxString("MIX A"),
-      wxString("MIX B"),
-      wxString("MIX C"),
-      wxString("MIX D"),
-  };
   const wxString Titles[N_MIX_SRCS / 2] = {
-      wxString("Input 1+2"),   wxString("Input 3+4"),   wxString("Playback1+2"),
-      wxString("Playback3+4"), wxString("Playback5+6"), wxString("Playback7+8"),
+      "IN1+2", "Disconnected", "Playback 1/2",
+      "Playback 3/4", "Playback 5/6", "Playback 7/8",
   };
 
   PanelMixers(wxWindow *parent, uint16_t pid = 0x8754)
       : wxPanel(parent, wxID_ANY) {
-    const auto MARGIN = FromDIP(8);
-    const auto COLS = 5 + 1;
-    auto sizer = new wxGridBagSizer(MARGIN, MARGIN);
-
-    int32_t row = 0;
-    SetWindowStyle(wxBORDER_SUNKEN);
-
-    rboxMixerSelBox =
-        new wxRadioBox(this, ID_MIX_BUS_SEL, "", wxDefaultPosition,
-                       wxDefaultSize, N_MIXERS, MixSels);
-    sizer->Add(rboxMixerSelBox, wxGBPosition(row, 0),
-               wxGBSpan(1, N_MIX_SRCS / 2 * COLS), wxALIGN_LEFT);
-
-    row = 1;
+    SetBackgroundColour(wxColour(33, 33, 33));
+    Bind(wxEVT_PAINT, [this](wxPaintEvent &evt) {
+      wxPaintDC dc(this);
+      dc.SetBackground(wxBrush(wxColour(33, 33, 33)));
+      dc.Clear();
+    });
+    
+    for (size_t i = 0; i < N_MIX_SRCS; i++) {
+      slPan[i] = nullptr;
+      ckPhase[i] = nullptr;
+    }
     for (size_t i = 0; i < N_MIX_SRCS / 2; i++) {
-      lbTitle[i] = new wxStaticText(this, wxID_ANY, Titles[i]);
-      lbTitle[i]->SetWindowStyle(wxALIGN_CENTER);
-      wxFont font = lbTitle[i]->GetFont();
-      lbTitle[i]->SetFont(font.Larger().Larger());
-
-      sizer->Add(lbTitle[i], wxGBPosition(row, i * COLS), wxGBSpan(1, COLS - 1),
-                 wxALIGN_CENTER | wxEXPAND);
+      lbTitle[i] = nullptr;
+      lbVolVal[i] = nullptr;
+      slVol[i] = nullptr;
+      slVolL[i] = nullptr;
+      slVolR[i] = nullptr;
+      btnLink[i] = nullptr;
+      ckMute[i] = nullptr;
+      ckSolo[i] = nullptr;
+      ckPhaseCombined[i] = nullptr;
+      ckMuteL[i] = ckMuteR[i] = ckSoloL[i] = ckSoloR[i] = nullptr;
+      combBtnSizer[i] = splitBtnSizer[i] = nullptr;
     }
 
-    // pan
-    row = 2;
-    for (size_t i = 0; i < N_MIX_SRCS / 2; i++) {
-      size_t l = i * 2;
-      size_t r = l + 1;
+    wxBoxSizer *mainSizer = new wxBoxSizer(wxVERTICAL);
 
-      slPan[l] =
-          new wxSlider(this, ID_MIX_PAN + l, 0, -100, 100, wxDefaultPosition,
-                       wxDefaultSize, wxSL_TOP | wxSL_VALUE_LABEL);
-      slPan[r] =
-          new wxSlider(this, ID_MIX_PAN + r, 0, -100, 100, wxDefaultPosition,
-                       wxDefaultSize, wxSL_TOP | wxSL_VALUE_LABEL);
+    // Title & Tab row
+    wxBoxSizer *titleRow = new wxBoxSizer(wxHORIZONTAL);
+    wxStaticText *lblTitle = new wxStaticText(this, wxID_ANY, "Mixer");
+    lblTitle->SetFont(lblTitle->GetFont().Bold().Larger());
+    lblTitle->SetForegroundColour(*wxWHITE);
+    titleRow->Add(lblTitle, 0, wxLEFT | wxTOP, 6);
+    
+    wxStaticText *lblBar = new wxStaticText(this, wxID_ANY, "  |");
+    lblBar->SetFont(lblBar->GetFont().Bold().Larger());
+    lblBar->SetForegroundColour(wxColour(80, 80, 80));
+    titleRow->Add(lblBar, 0, wxTOP, 6);
+    
+    tabBar = new wxPanel(this, wxID_ANY);
+    tabBar->SetBackgroundColour(wxColour(33, 33, 33));
+    tabBar->Bind(wxEVT_PAINT, [this](wxPaintEvent &evt) {
+      wxPaintDC dc(tabBar);
+      dc.SetBackground(wxBrush(wxColour(33, 33, 33)));
+      dc.Clear();
+    });
+    wxBoxSizer *tabSizer = new wxBoxSizer(wxHORIZONTAL);
+    
+    wxColour activeColors[4] = {
+      wxColour(89, 155, 34),   
+      wxColour(29, 115, 201),  
+      wxColour(241, 196, 15),  
+      wxColour(211, 84, 0)     
+    };
+    wxString mixNames[4] = { "Mix A", "Mix B", "Mix C", "Mix D" };
 
-      slPan[l]->SetTickFreq(25);
-      slPan[r]->SetTickFreq(25);
-      slPan[l]->SetPageSize(5);
-      slPan[r]->SetPageSize(5);
-      slPan[l]->SetValue(-100);
-      slPan[r]->SetValue(100);
-
-      sizer->Add(slPan[l], wxGBPosition(row, i * COLS + 0), wxGBSpan(1, 2),
-                 wxEXPAND);
-      sizer->Add(slPan[r], wxGBPosition(row, i * COLS + 3), wxGBSpan(1, 2),
-                 wxEXPAND);
+    for (int i = 0; i < N_MIXERS; ++i) {
+      tabButtons[i] = new CustomButton(tabBar, ID_MIX_BUS_SEL + i, mixNames[i], true, wxSize(45, 18), activeColors[i]);
+      tabSizer->Add(tabButtons[i], 0, wxLEFT | wxRIGHT, 4);
     }
-    // fader
-    row = 3;
-    for (size_t i = 0; i < N_MIX_SRCS / 2; i++) {
-      size_t l = i * 2;
-      size_t r = l + 1;
-      gaLevel[l] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition,
-                               FromDIP(wxSize(16, 100)), wxGA_VERTICAL);
-      gaLevel[r] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition,
-                               FromDIP(wxSize(16, 100)), wxGA_VERTICAL);
-      gaLevel[l]->SetValue(0);
-      gaLevel[r]->SetValue(0);
+    tabButtons[0]->SetValue(true); 
+    tabBar->SetSizer(tabSizer);
+    titleRow->Add(tabBar, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, 10);
+    
+    mainSizer->Add(titleRow, 0, wxBOTTOM, 4);
 
-      slVol[l] = new wxSlider(this, ID_MIX_VOL + l, 0, minGain, maxGain,
-                              wxDefaultPosition, FromDIP(wxSize(50, 100)),
-                              wxSL_VERTICAL | wxSL_RIGHT | wxSL_VALUE_LABEL |
-                                  wxSL_INVERSE);
-      slVol[r] = new wxSlider(this, ID_MIX_VOL + r, 0, minGain, maxGain,
-                              wxDefaultPosition, FromDIP(wxSize(50, 100)),
-                              wxSL_VERTICAL | wxSL_LEFT | wxSL_VALUE_LABEL |
-                                  wxSL_INVERSE);
-      slVolB[i] = new wxSlider(this, ID_MIX_VOL_B + i, 0, minGain, maxGain,
-                               wxDefaultPosition, FromDIP(wxSize(30, 100)),
-                               wxSL_VERTICAL | wxSL_INVERSE);
+    wxBoxSizer *stripsSizer = new wxBoxSizer(wxHORIZONTAL);
 
-      slVol[l]->SetTickFreq(6);
-      slVol[r]->SetTickFreq(6);
-      slVol[l]->SetPageSize(3);
-      slVol[r]->SetPageSize(3);
-      slVolB[i]->SetPageSize(3);
+    for (int i = 0; i < N_MIX_SRCS / 2; ++i) {
+      wxPanel *stripPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, "stripPanel");
+      stripPanel->SetBackgroundColour(wxColour(25, 25, 25));
+      stripPanel->Bind(wxEVT_PAINT, [stripPanel](wxPaintEvent &evt) {
+        wxPaintDC dc(stripPanel);
+        dc.SetBackground(wxBrush(wxColour(25, 25, 25)));
+        dc.Clear();
+      });
+      wxBoxSizer *stripSizer = new wxBoxSizer(wxVERTICAL);
 
-      sizer->Add(gaLevel[l], wxGBPosition(row, i * COLS), wxGBSpan(1, 1),
-                 wxEXPAND);
-      sizer->Add(gaLevel[r], wxGBPosition(row, i * COLS + 4), wxGBSpan(1, 1),
-                 wxEXPAND);
-      sizer->Add(slVol[l], wxGBPosition(row, i * COLS + 1), wxGBSpan(1, 1),
-                 wxEXPAND);
-      sizer->Add(slVol[r], wxGBPosition(row, i * COLS + 3), wxGBSpan(1, 1),
-                 wxEXPAND);
-      sizer->Add(slVolB[i], wxGBPosition(row, i * COLS + 2), wxGBSpan(1, 1),
-                 wxEXPAND);
-    }
-    sizer->AddGrowableRow(row, 1);
+      lbTitle[i] = new wxStaticText(stripPanel, wxID_ANY, Titles[i], wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbTitle[i]->SetFont(lbTitle[i]->GetFont().Bold());
+      lbTitle[i]->SetForegroundColour(wxColour(180, 180, 180));
+      stripSizer->Add(lbTitle[i], 0, wxALIGN_CENTER | wxTOP, 4);
 
-    row = 4;
+      int l = i * 2;
+      int r = l + 1;
+      PeaksI[l] = LEVEL_MIN;
+      PeaksI[r] = LEVEL_MIN;
+      mixLevelVal[l] = LEVEL_MIN;
+      mixLevelVal[r] = LEVEL_MIN;
 
-    for (size_t i = 0; i < N_MIX_SRCS / 2; i++) {
-      size_t a = i * 2;
-      size_t b = a + 1;
-      ckMute[a] = new wxToggleButton(this, ID_MIX_MUTE + a, "Mute",
-                                     wxDefaultPosition, wxDefaultSize);
-      ckMute[b] = new wxToggleButton(this, ID_MIX_MUTE + b, "Mute",
-                                     wxDefaultPosition, wxDefaultSize);
-      ckSolo[a] = new wxToggleButton(this, ID_MIX_SOLO + a, "Solo",
-                                     wxDefaultPosition, wxDefaultSize);
-      ckSolo[b] = new wxToggleButton(this, ID_MIX_SOLO + b, "Solo",
-                                     wxDefaultPosition, wxDefaultSize);
-      ckPhase[a] = new wxToggleButton(this, ID_MIX_PHASE + a, "Phase",
-                                      wxDefaultPosition, wxDefaultSize);
-      ckPhase[b] = new wxToggleButton(this, ID_MIX_PHASE + b, "Phase",
-                                      wxDefaultPosition, wxDefaultSize);
+      wxBoxSizer *panRow = new wxBoxSizer(wxHORIZONTAL);
+      slPan[l] = new KnobControl(stripPanel, ID_MIX_PAN + l, "Pan L", -100, 100, -100, wxSize(20, 26));
+      slPan[r] = new KnobControl(stripPanel, ID_MIX_PAN + r, "Pan R", -100, 100, 100, wxSize(20, 26));
+      panRow->Add(slPan[l], 1, wxEXPAND | wxRIGHT, 1);
+      panRow->Add(slPan[r], 1, wxEXPAND | wxLEFT, 1);
+      stripSizer->Add(panRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 2);
 
-      sizer->Add(ckMute[a], wxGBPosition(row, i * COLS + 0), wxGBSpan(1, 2),
-                 wxLEFT);
-      sizer->Add(ckMute[b], wxGBPosition(row, i * COLS + 3), wxGBSpan(1, 2),
-                 wxRIGHT);
-      sizer->Add(ckSolo[a], wxGBPosition(row + 1, i * COLS + 0), wxGBSpan(1, 2),
-                 wxCENTER);
-      sizer->Add(ckSolo[b], wxGBPosition(row + 1, i * COLS + 3), wxGBSpan(1, 2),
-                 wxCENTER);
-      if (pid == 0x8754) {
-        sizer->Add(ckPhase[a], wxGBPosition(row + 2, i * COLS + 0),
-                   wxGBSpan(1, 2), wxCENTER);
-        sizer->Add(ckPhase[b], wxGBPosition(row + 2, i * COLS + 3),
-                   wxGBSpan(1, 2), wxCENTER);
+      // Link Button
+      btnLink[i] = new CustomButton(stripPanel, ID_MIX_LINK + i, "Link", true, wxSize(36, 14), wxColour(29, 115, 201));
+      btnLink[i]->SetValue(i == 0 ? false : true);
+      stripSizer->Add(btnLink[i], 0, wxALIGN_CENTER | wxTOP, 2);
+
+      // Volume display text
+      lbVolVal[i] = new wxStaticText(stripPanel, wxID_ANY, "-inf  -inf", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbVolVal[i]->SetForegroundColour(wxColour(220, 220, 220));
+      lbVolVal[i]->SetFont(lbVolVal[i]->GetFont().Smaller());
+      stripSizer->Add(lbVolVal[i], 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, 2);
+
+      // Horizontal fader sizer to hold linked fader OR split faders
+      wxBoxSizer *faderSizer = new wxBoxSizer(wxHORIZONTAL);
+      slVol[i] = new FaderStrip(stripPanel, ID_MIX_VOL_B + i, minGain, maxGain, true, wxSize(50, 100));
+      slVolL[i] = new FaderStrip(stripPanel, ID_MIX_VOL + l, minGain, maxGain, false, wxSize(32, 100));
+      slVolR[i] = new FaderStrip(stripPanel, ID_MIX_VOL + r, minGain, maxGain, false, wxSize(32, 100));
+      
+      faderSizer->Add(slVolL[i], 1, wxEXPAND);
+      faderSizer->Add(slVolR[i], 1, wxEXPAND);
+      faderSizer->Add(slVol[i], 1, wxEXPAND);
+      
+      if (i == 0) {
+        slVol[i]->Hide();
       } else {
-        ckPhase[a]->Hide();
-        ckPhase[b]->Hide();
+        slVolL[i]->Hide();
+        slVolR[i]->Hide();
       }
+      
+      stripSizer->Add(faderSizer, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
+
+      // Buttons Container Zone
+      wxBoxSizer *btnZoneSizer = new wxBoxSizer(wxVERTICAL);
+
+      // 1. Combined Buttons
+      combBtnSizer[i] = new wxBoxSizer(wxVERTICAL);
+      ckPhaseCombined[i] = new CustomButton(stripPanel, ID_MIX_PHASE + l, "Ø", true, wxSize(36, 13), wxColour(89, 155, 34));
+      ckSolo[i] = new CustomButton(stripPanel, ID_MIX_SOLO + i, "SOLO", true, wxSize(36, 15), wxColour(241, 196, 15));
+      ckMute[i] = new CustomButton(stripPanel, ID_MIX_MUTE + i, "MUTE", true, wxSize(36, 15), wxColour(192, 57, 43));
+      
+      if (i < 2 && pid == 0x8754) combBtnSizer[i]->Add(ckPhaseCombined[i], 0, wxALIGN_CENTER | wxBOTTOM, 2);
+      else ckPhaseCombined[i]->Hide();
+
+      combBtnSizer[i]->Add(ckSolo[i], 0, wxALIGN_CENTER | wxBOTTOM, 2);
+      combBtnSizer[i]->Add(ckMute[i], 0, wxALIGN_CENTER | wxBOTTOM, 2);
+      if (i == 0) {
+        combBtnSizer[i]->Show(false);
+      }
+      btnZoneSizer->Add(combBtnSizer[i], 0, wxEXPAND);
+
+      // 2. Split Buttons
+      splitBtnSizer[i] = new wxBoxSizer(wxHORIZONTAL);
+      
+      wxBoxSizer *lBtnCol = new wxBoxSizer(wxVERTICAL);
+      ckPhase[l] = new CustomButton(stripPanel, ID_MIX_PHASE + l, "Ø", true, wxSize(18, 13), wxColour(89, 155, 34));
+      ckSoloL[i] = new CustomButton(stripPanel, ID_MIX_SOLO + i, "SOLO", true, wxSize(18, 15), wxColour(241, 196, 15));
+      ckMuteL[i] = new CustomButton(stripPanel, ID_MIX_MUTE + i, "MUTE", true, wxSize(18, 15), wxColour(192, 57, 43));
+      if (i < 2 && pid == 0x8754) lBtnCol->Add(ckPhase[l], 0, wxBOTTOM, 2);
+      else ckPhase[l]->Hide();
+      lBtnCol->Add(ckSoloL[i], 0, wxBOTTOM, 2);
+      lBtnCol->Add(ckMuteL[i], 0, wxBOTTOM, 2);
+
+      wxBoxSizer *rBtnCol = new wxBoxSizer(wxVERTICAL);
+      ckPhase[r] = new CustomButton(stripPanel, ID_MIX_PHASE + r, "Ø", true, wxSize(18, 13), wxColour(89, 155, 34));
+      ckSoloR[i] = new CustomButton(stripPanel, ID_MIX_SOLO + (i + 10), "SOLO", true, wxSize(18, 15), wxColour(241, 196, 15));
+      ckMuteR[i] = new CustomButton(stripPanel, ID_MIX_MUTE + (i + 10), "MUTE", true, wxSize(18, 15), wxColour(192, 57, 43));
+      if (i < 2 && pid == 0x8754) rBtnCol->Add(ckPhase[r], 0, wxBOTTOM, 2);
+      else ckPhase[r]->Hide();
+      rBtnCol->Add(ckSoloR[i], 0, wxBOTTOM, 2);
+      rBtnCol->Add(ckMuteR[i], 0, wxBOTTOM, 2);
+
+      splitBtnSizer[i]->Add(lBtnCol, 1, wxEXPAND | wxRIGHT, 1);
+      splitBtnSizer[i]->Add(rBtnCol, 1, wxEXPAND | wxLEFT, 1);
+      btnZoneSizer->Add(splitBtnSizer[i], 0, wxEXPAND);
+      splitBtnSizer[i]->Show(i == 0 ? true : false); 
+
+      stripSizer->Add(btnZoneSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 2);
+
+      stripPanel->SetSizer(stripSizer);
+      stripsSizer->Add(stripPanel, 1, wxEXPAND | wxALL, 2);
     }
-    // spacer
-    for (size_t i = 1; i < N_MIX_SRCS / 2; i++) {
-      sizer->Add(FromDIP(24), 0, wxGBPosition(1, i * COLS - 1), wxGBSpan(3, 1));
-    }
-    SetSizer(sizer);
-  };
-}; // PanelMixers
+    mainSizer->Add(stripsSizer, 1, wxEXPAND);
+    SetMinSize(wxSize(680, -1));
+    SetMaxSize(wxSize(680, -1));
+    SetSizer(mainSizer);
+  }
+};
 
 class PanelLoopbacks : public wxPanel {
 public:
   const static int32_t N_LOOPBACKS = 3;
-
-  int32_t PeaksI[N_LOOPBACKS * 2];
-
   const static int32_t LEVEL_MIN = -960;
   const static int32_t LEVEL_MAX = 10;
-  // const static double LEVEL_UNIT = 0.1;
   const static int32_t LEVEL_RANGE = LEVEL_MAX - LEVEL_MIN;
   const static int32_t minGain = -60;
-  const static int32_t maxGain = 20; // for the int32_t ,  NEVER exceed 36!
-
-  const wxString OutputSels[14] = {
-      wxString("IN1"),         wxString("IN2"),         wxString("IN3"),
-      wxString("IN4"),         wxString("IN1+2"),       wxString("IN3+4"),
-      wxString("Playback1+2"), wxString("Playback3+4"), wxString("Playback5+6"),
-      wxString("Playback7+8"), wxString("MIX A"),       wxString("MIX B"),
-      wxString("MIX C"),       wxString("MIX D"),
-  };
+  const static int32_t maxGain = 20;
 
   wxStaticText *lbTitle[N_LOOPBACKS];
   wxComboBox *cbSelect[N_LOOPBACKS];
-  wxGauge *gaLevelsI[N_LOOPBACKS * 2];
-  wxGauge *gaLevelsO[N_LOOPBACKS * 2];
-  wxSlider *slOutputL[N_LOOPBACKS];
-  wxSlider *slOutputB[N_LOOPBACKS];
-  wxSlider *slOutputR[N_LOOPBACKS];
+  wxStaticText *lbLoopVolVal[N_LOOPBACKS];
+  
+  FaderStrip *slOutput[N_LOOPBACKS]; 
+  FaderStrip *slOutputL[N_LOOPBACKS]; 
+  FaderStrip *slOutputR[N_LOOPBACKS]; 
+  CustomButton *btnLink[N_LOOPBACKS]; 
 
-  wxToggleButton *ckMute[N_LOOPBACKS * 2];
+  // Combined Mute
+  CustomButton *ckMute[N_LOOPBACKS];
+  
+  // Split Mutes
+  CustomButton *ckMuteL[N_LOOPBACKS];
+  CustomButton *ckMuteR[N_LOOPBACKS];
 
-  PanelLoopbacks(wxWindow *parent) : wxPanel(parent, wxID_ANY) {
-    const auto MARGIN = FromDIP(8);
-    auto sizer = new wxGridBagSizer(MARGIN, MARGIN);
-    const int32_t COLS = 7 + 1;
-    SetWindowStyle(wxSIMPLE_BORDER);
-    for (size_t i = 0; i < N_LOOPBACKS; i++) {
-      lbTitle[i] = new wxStaticText(
-          this, wxID_ANY, std::format("Loopback{}+{}", i * 2 + 1, i * 2 + 2));
-      lbTitle[i]->SetWindowStyle(wxALIGN_CENTER);
-      wxFont font = lbTitle[i]->GetFont();
-      lbTitle[i]->SetFont(font.Larger().Larger());
+  wxBoxSizer *combBtnSizer[N_LOOPBACKS];
+  wxBoxSizer *splitBtnSizer[N_LOOPBACKS];
 
-      sizer->Add(lbTitle[i], wxGBPosition(0, i * COLS), wxGBSpan(1, COLS - 1),
-                 wxALIGN_CENTER);
-    }
-
-    for (size_t i = 0; i < N_LOOPBACKS; i++) {
-      cbSelect[i] = new wxComboBox(this, ID_LOOP_SEL + i, OutputSels[10 + i],
-                                   wxDefaultPosition, wxDefaultSize, 14,
-                                   OutputSels, wxCB_READONLY);
-      cbSelect[i]->SetHint("Select Output Source");
-      sizer->Add(cbSelect[i], wxGBPosition(1, i * COLS), wxGBSpan(1, COLS - 1),
-                 wxALIGN_CENTER);
-    }
-
-    for (size_t i = 0; i < N_LOOPBACKS; i++) {
-      int32_t l = i * 2;
-      int32_t r = l + 1;
-
-      gaLevelsI[l] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition,
-                                 FromDIP(wxSize(16, 100)), wxGA_VERTICAL);
-      gaLevelsI[r] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition,
-                                 FromDIP(wxSize(16, 100)), wxGA_VERTICAL);
-      gaLevelsO[l] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition,
-                                 FromDIP(wxSize(24, 100)), wxGA_VERTICAL);
-      gaLevelsO[r] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition,
-                                 FromDIP(wxSize(24, 100)), wxGA_VERTICAL);
-
-      slOutputL[i] = new wxSlider(this, ID_LOOP_VOL_L + i, 0, -90, 6,
-                                  wxDefaultPosition, FromDIP(wxSize(60, 0)),
-                                  wxSL_VERTICAL | wxSL_RIGHT |
-                                      wxSL_VALUE_LABEL | wxSL_INVERSE);
-      slOutputB[i] =
-          new wxSlider(this, ID_LOOP_VOL_B + i, 0, -90, 6, wxDefaultPosition,
-                       FromDIP(wxSize(30, 0)), wxSL_VERTICAL | wxSL_INVERSE);
-      slOutputR[i] = new wxSlider(this, ID_LOOP_VOL_R + i, 0, -90, 6,
-                                  wxDefaultPosition, FromDIP(wxSize(60, 0)),
-                                  wxSL_VERTICAL | wxSL_LEFT | wxSL_VALUE_LABEL |
-                                      wxSL_INVERSE);
-
-      gaLevelsI[l]->SetValue(0);
-      gaLevelsI[r]->SetValue(0);
-      gaLevelsO[l]->SetValue(0);
-      gaLevelsO[r]->SetValue(0);
-
-      slOutputL[i]->SetPageSize(3);
-      slOutputB[i]->SetPageSize(3);
-      slOutputR[i]->SetPageSize(3);
-      slOutputL[i]->SetTickFreq(6);
-      // slOutputB[i]->SetTickFreq(6);
-      slOutputR[i]->SetTickFreq(6);
-
-      sizer->Add(slOutputL[i], wxGBPosition(2, i * COLS + 2), wxGBSpan(1, 1),
-                 wxEXPAND);
-      sizer->Add(slOutputR[i], wxGBPosition(2, i * COLS + 4), wxGBSpan(1, 1),
-                 wxEXPAND);
-      sizer->Add(slOutputB[i], wxGBPosition(2, i * COLS + 3), wxGBSpan(1, 1),
-                 wxEXPAND);
-      sizer->Add(gaLevelsI[l], wxGBPosition(2, i * COLS + 0), wxGBSpan(1, 1),
-                 wxEXPAND);
-      sizer->Add(gaLevelsI[r], wxGBPosition(2, i * COLS + 6), wxGBSpan(1, 1),
-                 wxEXPAND);
-      sizer->Add(gaLevelsO[l], wxGBPosition(2, i * COLS + 1), wxGBSpan(1, 1),
-                 wxEXPAND);
-      sizer->Add(gaLevelsO[r], wxGBPosition(2, i * COLS + 5), wxGBSpan(1, 1),
-                 wxEXPAND);
-    }
-
-    for (size_t i = 0; i < N_LOOPBACKS; i++) {
-      int32_t l = i * 2;
-      int32_t r = l + 1;
-
-      ckMute[l] = new wxToggleButton(this, ID_LOOP_MUTE + l, "Mute",
-                                     wxDefaultPosition, wxDefaultSize);
-      ckMute[r] = new wxToggleButton(this, ID_LOOP_MUTE + r, "Mute",
-                                     wxDefaultPosition, wxDefaultSize);
-
-      sizer->Add(ckMute[l], wxGBPosition(3, i * COLS + 0), wxGBSpan(1, 3),
-                 wxALIGN_CENTER);
-      sizer->Add(ckMute[r], wxGBPosition(3, i * COLS + 4), wxGBSpan(1, 3),
-                 wxALIGN_CENTER);
-    }
-
-    for (size_t i = 1; i < N_LOOPBACKS; i++) {
-      sizer->Add(FromDIP(16), 0, wxGBPosition(0, i * COLS - 1), wxGBSpan(4, 1));
-    }
-    sizer->AddGrowableRow(2, 1);
-    SetSizer(sizer);
-  };
-}; // PanelLoopbacks
-class PanelOutputs : public wxPanel {
-public:
-  const static int32_t N_OUTPUTS = 2;
-  wxStaticText *lbTitle[3];
-  wxComboBox *cbSelect[N_OUTPUTS];
-  wxGauge *gaLevelsI[N_OUTPUTS * 2];
-  wxGauge *gaLevelsO[N_OUTPUTS * 2];
-  wxSlider *slOutputL[N_OUTPUTS];
-  wxSlider *slOutputB[N_OUTPUTS];
-  wxSlider *slOutputR[N_OUTPUTS];
-
-  wxToggleButton *ckOutputLine[N_OUTPUTS];
-  wxToggleButton *ckOutputMon[N_OUTPUTS];
-
-  int32_t PeaksI[N_OUTPUTS * 4];
-
-  const static int32_t LEVEL_MIN = -960;
-  const static int32_t LEVEL_MAX = 10;
-  // const static double LEVEL_UNIT = 0.1;
-  const static int32_t LEVEL_RANGE = LEVEL_MAX - LEVEL_MIN;
-  const static int32_t minGain = -60;
-  const static int32_t maxGain = 20; // for the int32_t ,  NEVER exceed 36!
+  int32_t loopLevelVal[N_LOOPBACKS * 2];
 
   const wxString OutputSels[14] = {
-      wxString("IN1"),         wxString("IN2"),         wxString("IN3"),
-      wxString("IN4"),         wxString("IN1+2"),       wxString("IN3+4"),
-      wxString("Playback1+2"), wxString("Playback3+4"), wxString("Playback5+6"),
-      wxString("Playback7+8"), wxString("MIX A"),       wxString("MIX B"),
-      wxString("MIX C"),       wxString("MIX D"),
+      "IN1", "IN2", "IN3", "IN4", "IN1+2", "IN3+4",
+      "Playback1+2", "Playback3+4", "Playback5+6",
+      "Playback7+8", "MIX A", "MIX B", "MIX C", "MIX D",
   };
+
+  PanelLoopbacks(wxWindow *parent, uint16_t pid = 0x8754) : wxPanel(parent, wxID_ANY) {
+    SetBackgroundColour(wxColour(33, 33, 33));
+    Bind(wxEVT_PAINT, [this](wxPaintEvent &evt) {
+      wxPaintDC dc(this);
+      dc.SetBackground(wxBrush(wxColour(33, 33, 33)));
+      dc.Clear();
+    });
+    
+    for (size_t i = 0; i < N_LOOPBACKS; i++) {
+      lbTitle[i] = nullptr;
+      cbSelect[i] = nullptr;
+      lbLoopVolVal[i] = nullptr;
+      slOutput[i] = nullptr;
+      slOutputL[i] = nullptr;
+      slOutputR[i] = nullptr;
+      btnLink[i] = nullptr;
+      ckMute[i] = nullptr;
+      ckMuteL[i] = ckMuteR[i] = nullptr;
+      combBtnSizer[i] = splitBtnSizer[i] = nullptr;
+    }
+
+    wxBoxSizer *mainSizer = new wxBoxSizer(wxVERTICAL);
+
+    // Title Row
+    wxBoxSizer *titleRow = new wxBoxSizer(wxHORIZONTAL);
+    wxStaticText *lblTitle = new wxStaticText(this, wxID_ANY, "Loopback");
+    lblTitle->SetFont(lblTitle->GetFont().Bold().Larger());
+    lblTitle->SetForegroundColour(*wxWHITE);
+    titleRow->Add(lblTitle, 0, wxLEFT | wxTOP, 6);
+    
+    wxStaticText *lblBar = new wxStaticText(this, wxID_ANY, "  |");
+    lblBar->SetFont(lblBar->GetFont().Bold().Larger());
+    lblBar->SetForegroundColour(wxColour(80, 80, 80));
+    titleRow->Add(lblBar, 0, wxTOP, 6);
+    
+    mainSizer->Add(titleRow, 0, wxBOTTOM, 4);
+
+    wxBoxSizer *stripsSizer = new wxBoxSizer(wxHORIZONTAL);
+
+    int numStrips = (pid == 0x8754) ? 3 : 1;
+    for (int i = 0; i < numStrips; ++i) {
+      wxPanel *stripPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, "stripPanel");
+      stripPanel->SetBackgroundColour(wxColour(25, 25, 25));
+      stripPanel->Bind(wxEVT_PAINT, [stripPanel](wxPaintEvent &evt) {
+        wxPaintDC dc(stripPanel);
+        dc.SetBackground(wxBrush(wxColour(25, 25, 25)));
+        dc.Clear();
+      });
+      wxBoxSizer *stripSizer = new wxBoxSizer(wxVERTICAL);
+
+      lbTitle[i] = new wxStaticText(stripPanel, wxID_ANY, std::format("Loopback {}+{}", i*2+1, i*2+2), wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbTitle[i]->SetFont(lbTitle[i]->GetFont().Bold());
+      lbTitle[i]->SetForegroundColour(wxColour(180, 180, 180));
+      stripSizer->Add(lbTitle[i], 0, wxALIGN_CENTER | wxTOP, 4);
+
+      cbSelect[i] = new wxComboBox(stripPanel, ID_LOOP_SEL + i, OutputSels[10 + i], wxDefaultPosition, wxSize(80, -1), 14, OutputSels, wxCB_READONLY);
+      stripSizer->Add(cbSelect[i], 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 2);
+
+      // Link Button
+      btnLink[i] = new CustomButton(stripPanel, ID_LOOP_LINK + i, "Link", true, wxSize(36, 14), wxColour(29, 115, 201));
+      btnLink[i]->SetValue(true);
+      stripSizer->Add(btnLink[i], 0, wxALIGN_CENTER | wxTOP, 2);
+
+      // Volume display text
+      lbLoopVolVal[i] = new wxStaticText(stripPanel, wxID_ANY, "-inf  -inf", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbLoopVolVal[i]->SetForegroundColour(wxColour(220, 220, 220));
+      lbLoopVolVal[i]->SetFont(lbLoopVolVal[i]->GetFont().Smaller());
+      stripSizer->Add(lbLoopVolVal[i], 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, 2);
+
+      wxBoxSizer *faderSizer = new wxBoxSizer(wxHORIZONTAL);
+      slOutput[i] = new FaderStrip(stripPanel, ID_LOOP_VOL_B + i, minGain, maxGain, true, wxSize(50, 95));
+      slOutputL[i] = new FaderStrip(stripPanel, ID_LOOP_VOL_L + i, minGain, maxGain, false, wxSize(32, 95));
+      slOutputR[i] = new FaderStrip(stripPanel, ID_LOOP_VOL_R + i, minGain, maxGain, false, wxSize(32, 95));
+      
+      faderSizer->Add(slOutputL[i], 1, wxEXPAND);
+      faderSizer->Add(slOutputR[i], 1, wxEXPAND);
+      faderSizer->Add(slOutput[i], 1, wxEXPAND);
+      
+      slOutputL[i]->Hide();
+      slOutputR[i]->Hide();
+
+      stripSizer->Add(faderSizer, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
+
+      // Mute Buttons Container Zone
+      wxBoxSizer *btnZoneSizer = new wxBoxSizer(wxVERTICAL);
+
+      combBtnSizer[i] = new wxBoxSizer(wxVERTICAL);
+      ckMute[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + i, "MUTE", true, wxSize(36, 16), wxColour(192, 57, 43));
+      combBtnSizer[i]->Add(ckMute[i], 0, wxALIGN_CENTER);
+      btnZoneSizer->Add(combBtnSizer[i], 0, wxEXPAND);
+
+      splitBtnSizer[i] = new wxBoxSizer(wxHORIZONTAL);
+      ckMuteL[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + i, "MUTE", true, wxSize(18, 16), wxColour(192, 57, 43));
+      ckMuteR[i] = new CustomButton(stripPanel, ID_LOOP_MUTE + (i + 10), "MUTE", true, wxSize(18, 16), wxColour(192, 57, 43));
+      splitBtnSizer[i]->Add(ckMuteL[i], 1, wxEXPAND | wxRIGHT, 1);
+      splitBtnSizer[i]->Add(ckMuteR[i], 1, wxEXPAND | wxLEFT, 1);
+      btnZoneSizer->Add(splitBtnSizer[i], 0, wxEXPAND);
+      splitBtnSizer[i]->Show(false); 
+
+      stripSizer->Add(btnZoneSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
+
+      loopLevelVal[i * 2] = LEVEL_MIN;
+      loopLevelVal[i * 2 + 1] = LEVEL_MIN;
+
+      stripPanel->SetSizer(stripSizer);
+      stripPanel->SetMinSize(wxSize(120, -1));
+      stripsSizer->Add(stripPanel, 0, wxEXPAND | wxALL, 2);
+    }
+    stripsSizer->AddStretchSpacer(1);
+    mainSizer->Add(stripsSizer, 1, wxEXPAND);
+    int panelWidth = numStrips * 120 + 8;
+    SetMinSize(wxSize(panelWidth, -1));
+    SetMaxSize(wxSize(panelWidth, -1));
+    SetSizer(mainSizer);
+  }
+};
+
+class PanelOutputs : public wxPanel {
+public:
+  const static int32_t N_OUTPUTS = 3;
+  const static int32_t LEVEL_MIN = -960;
+  const static int32_t LEVEL_MAX = 10;
+  const static int32_t LEVEL_RANGE = LEVEL_MAX - LEVEL_MIN;
+  const static int32_t minGain = -60;
+  const static int32_t maxGain = 20;
+
+  wxStaticText *lbTitle[N_OUTPUTS];
+  wxComboBox *cbSelect[N_OUTPUTS];
+  wxStaticText *lbOutVolVal[N_OUTPUTS];
+  
+  FaderStrip *slOutput[N_OUTPUTS]; 
+  FaderStrip *slOutputL[N_OUTPUTS]; 
+  FaderStrip *slOutputR[N_OUTPUTS]; 
+  CustomButton *btnLink[N_OUTPUTS]; 
+
+  // Combined Mutes
+  CustomButton *ckMute[N_OUTPUTS];
+
+  // Split Mutes
+  CustomButton *ckMuteL[N_OUTPUTS];
+  CustomButton *ckMuteR[N_OUTPUTS];
+
+  wxBoxSizer *combBtnSizer[N_OUTPUTS];
+  wxBoxSizer *splitBtnSizer[N_OUTPUTS];
+
+  CustomButton *btnTRS[2];
+  CustomButton *btnAUX[2];
+  CustomButton *btnPhoneIcon[2]; 
+
+  KnobControl *mixKnob;
+  CustomButton *btnPhoneGain;
+  wxChoice *choicePhoneOut;
+  wxStaticText *lblMixVal;
+
+  int32_t outLevelVal[N_OUTPUTS * 2];
+  int m_phoneMix[2];
+  bool m_phoneGain[2];
+
+  const wxString OutputSels[14] = {
+      "IN1", "IN2", "IN3", "IN4", "IN1+2", "IN3+4",
+      "Playback1+2", "Playback3+4", "Playback5+6",
+      "Playback7+8", "MIX A", "MIX B", "MIX C", "MIX D",
+  };
+
   PanelOutputs(wxWindow *parent, uint16_t pid = 0x8754)
       : wxPanel(parent, wxID_ANY) {
-    const auto MARGIN = FromDIP(8);
-    auto sizer = new wxGridBagSizer(MARGIN, MARGIN);
-    const int32_t COLS = 7 + 1;
-    SetWindowStyle(wxBORDER_SUNKEN);
+    SetBackgroundColour(wxColour(33, 33, 33));
+    Bind(wxEVT_PAINT, [this](wxPaintEvent &evt) {
+      wxPaintDC dc(this);
+      dc.SetBackground(wxBrush(wxColour(33, 33, 33)));
+      dc.Clear();
+    });
+    
+    // Safety null initializations
+    for (size_t i = 0; i < N_OUTPUTS; i++) {
+      lbTitle[i] = nullptr;
+      cbSelect[i] = nullptr;
+      lbOutVolVal[i] = nullptr;
+      slOutput[i] = nullptr;
+      slOutputL[i] = nullptr;
+      slOutputR[i] = nullptr;
+      btnLink[i] = nullptr;
+      ckMute[i] = nullptr;
+      ckMuteL[i] = ckMuteR[i] = nullptr;
+      combBtnSizer[i] = splitBtnSizer[i] = nullptr;
+    }
+    for (size_t i = 0; i < 2; i++) {
+      btnTRS[i] = nullptr;
+      btnAUX[i] = nullptr;
+      btnPhoneIcon[i] = nullptr;
+    }
+
+    wxBoxSizer *mainSizer = new wxBoxSizer(wxVERTICAL);
+
+    // Title Row
+    wxBoxSizer *titleRow = new wxBoxSizer(wxHORIZONTAL);
+    wxStaticText *lblTitle = new wxStaticText(this, wxID_ANY, "Output");
+    lblTitle->SetFont(lblTitle->GetFont().Bold().Larger());
+    lblTitle->SetForegroundColour(*wxWHITE);
+    titleRow->Add(lblTitle, 0, wxLEFT | wxTOP, 6);
+    
+    wxStaticText *lblBar = new wxStaticText(this, wxID_ANY, "  |");
+    lblBar->SetFont(lblBar->GetFont().Bold().Larger());
+    lblBar->SetForegroundColour(wxColour(80, 80, 80));
+    titleRow->Add(lblBar, 0, wxTOP, 6);
+    
+    mainSizer->Add(titleRow, 0, wxBOTTOM, 4);
+
+    wxBoxSizer *stripsSizer = new wxBoxSizer(wxHORIZONTAL);
 
     bool isOTG = (pid == 0x8755 || pid == 0x8756);
     bool isE2x2 = (pid == 0x8752);
-    bool isE4x4 = (pid == 0x8754);
 
-    // 1. Titles
-    if (isE4x4) {
-      lbTitle[0] = new wxStaticText(this, wxID_ANY, "Output1");
-      lbTitle[1] = new wxStaticText(this, wxID_ANY, "Output2");
-    } else if (isOTG) {
-      lbTitle[0] = new wxStaticText(this, wxID_ANY, "Output 1+2");
-      lbTitle[1] = new wxStaticText(this, wxID_ANY, "Mobile OUT");
-    } else { // E2x2 non-OTG
-      lbTitle[0] = new wxStaticText(this, wxID_ANY, "Output 1+2");
-      lbTitle[1] = new wxStaticText(this, wxID_ANY, "Unused");
-    }
+    int numStrips = 3; 
+    if (isE2x2) numStrips = 1;
+    else if (isOTG) numStrips = 2; 
 
-    for (size_t i = 0; i < 2; ++i) {
-      lbTitle[i]->SetWindowStyle(wxALIGN_CENTER);
-      lbTitle[i]->SetFont(lbTitle[i]->GetFont().Larger().Larger());
-    }
+    for (int i = 0; i < numStrips; ++i) {
+      wxPanel *stripPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, "stripPanel");
+      stripPanel->SetBackgroundColour(wxColour(25, 25, 25));
+      stripPanel->Bind(wxEVT_PAINT, [stripPanel](wxPaintEvent &evt) {
+        wxPaintDC dc(stripPanel);
+        dc.SetBackground(wxBrush(wxColour(25, 25, 25)));
+        dc.Clear();
+      });
+      wxBoxSizer *stripSizer = new wxBoxSizer(wxVERTICAL);
 
-    // Add titles to sizer
-    sizer->Add(lbTitle[0], wxGBPosition(0, 0 * COLS), wxGBSpan(1, COLS - 1),
-               wxALIGN_CENTER);
-    if (!isE2x2) {
-      sizer->Add(lbTitle[1], wxGBPosition(0, 1 * COLS), wxGBSpan(1, COLS - 1),
-                 wxALIGN_CENTER);
-    }
+      wxString name;
+      if (i == 0) name = "Output 1+2";
+      else if (i == 1 && isOTG) name = "Mobile OUT";
+      else if (i == 1) name = "Disconnected";
+      else name = "S/PDIF OUT";
 
-    // 2. Combo Boxes (cbSelect)
-    for (size_t i = 0; i < N_OUTPUTS; i++) {
-      cbSelect[i] = new wxComboBox(this, ID_OUTPUT_SEL + i, OutputSels[6],
-                                   wxDefaultPosition, wxDefaultSize, 14,
-                                   OutputSels, wxCB_READONLY);
-      if (i == 0 || (i == 1 && isOTG) || (i == 1 && isE4x4)) {
-        sizer->Add(cbSelect[i], wxGBPosition(1, i * COLS),
-                   wxGBSpan(1, COLS - 1), wxALIGN_CENTER);
-      } else {
-        cbSelect[i]->Hide();
-      }
-    }
+      lbTitle[i] = new wxStaticText(stripPanel, wxID_ANY, name, wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbTitle[i]->SetFont(lbTitle[i]->GetFont().Bold());
+      lbTitle[i]->SetForegroundColour(wxColour(180, 180, 180));
+      stripSizer->Add(lbTitle[i], 0, wxALIGN_CENTER | wxTOP, 4);
 
-    // 3. Gauges & Sliders
-    for (size_t i = 0; i < N_OUTPUTS; i++) {
-      int32_t l = i * 2;
-      int32_t r = l + 1;
+      cbSelect[i] = new wxComboBox(stripPanel, ID_OUTPUT_SEL + i, OutputSels[6], wxDefaultPosition, wxSize(80, -1), 14, OutputSels, wxCB_READONLY);
+      stripSizer->Add(cbSelect[i], 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 2);
 
-      gaLevelsI[l] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition,
-                                 FromDIP(wxSize(16, 100)), wxGA_VERTICAL);
-      gaLevelsI[r] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition,
-                                 FromDIP(wxSize(16, 100)), wxGA_VERTICAL);
-      gaLevelsO[l] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition,
-                                 FromDIP(wxSize(24, 100)), wxGA_VERTICAL);
-      gaLevelsO[r] = new wxGauge(this, wxID_ANY, LEVEL_RANGE, wxDefaultPosition,
-                                 FromDIP(wxSize(24, 100)), wxGA_VERTICAL);
+      // Link Button
+      btnLink[i] = new CustomButton(stripPanel, ID_OUTPUT_LINK + i, "Link", true, wxSize(36, 14), wxColour(29, 115, 201));
+      btnLink[i]->SetValue(true);
+      stripSizer->Add(btnLink[i], 0, wxALIGN_CENTER | wxTOP, 2);
 
-      slOutputL[i] = new wxSlider(
-          this, ID_OUTPUT_VOL_L + i, 0, minGain, maxGain, wxDefaultPosition,
-          FromDIP(wxSize(60, 0)),
-          wxSL_VERTICAL | wxSL_RIGHT | wxSL_VALUE_LABEL | wxSL_INVERSE);
-      slOutputB[i] = new wxSlider(
-          this, ID_OUTPUT_VOL_B + i, 0, minGain, maxGain, wxDefaultPosition,
-          FromDIP(wxSize(30, 0)), wxSL_VERTICAL | wxSL_INVERSE);
-      slOutputR[i] = new wxSlider(
-          this, ID_OUTPUT_VOL_R + i, 0, minGain, maxGain, wxDefaultPosition,
-          FromDIP(wxSize(60, 0)),
-          wxSL_VERTICAL | wxSL_LEFT | wxSL_VALUE_LABEL | wxSL_INVERSE);
+      // Volume display text
+      lbOutVolVal[i] = new wxStaticText(stripPanel, wxID_ANY, "-inf  -inf", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+      lbOutVolVal[i]->SetForegroundColour(wxColour(220, 220, 220));
+      lbOutVolVal[i]->SetFont(lbOutVolVal[i]->GetFont().Smaller());
+      stripSizer->Add(lbOutVolVal[i], 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, 2);
 
-      gaLevelsI[l]->SetValue(0);
-      gaLevelsI[r]->SetValue(0);
-      gaLevelsO[l]->SetValue(0);
-      gaLevelsO[r]->SetValue(0);
+      wxBoxSizer *faderSizer = new wxBoxSizer(wxHORIZONTAL);
+      slOutput[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_B + i, minGain, maxGain, true, wxSize(50, 95));
+      slOutputL[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_L + i, minGain, maxGain, false, wxSize(32, 95));
+      slOutputR[i] = new FaderStrip(stripPanel, ID_OUTPUT_VOL_R + i, minGain, maxGain, false, wxSize(32, 95));
+      
+      faderSizer->Add(slOutputL[i], 1, wxEXPAND);
+      faderSizer->Add(slOutputR[i], 1, wxEXPAND);
+      faderSizer->Add(slOutput[i], 1, wxEXPAND);
+      
+      slOutputL[i]->Hide();
+      slOutputR[i]->Hide();
 
-      slOutputL[i]->SetPageSize(3);
-      slOutputB[i]->SetPageSize(3);
-      slOutputR[i]->SetPageSize(3);
-      slOutputL[i]->SetTickFreq(6);
-      // slOutputB[i]->SetTickFreq(6);
-      slOutputR[i]->SetTickFreq(6);
+      stripSizer->Add(faderSizer, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
 
-      if (i == 0 || (i == 1 && isOTG) || (i == 1 && isE4x4)) {
-        sizer->Add(slOutputL[i], wxGBPosition(2, i * COLS + 2), wxGBSpan(1, 1),
-                   wxEXPAND);
-        sizer->Add(slOutputR[i], wxGBPosition(2, i * COLS + 4), wxGBSpan(1, 1),
-                   wxEXPAND);
-        sizer->Add(slOutputB[i], wxGBPosition(2, i * COLS + 3), wxGBSpan(1, 1),
-                   wxEXPAND);
-        sizer->Add(gaLevelsI[l], wxGBPosition(2, i * COLS + 0), wxGBSpan(1, 1),
-                   wxEXPAND);
-        sizer->Add(gaLevelsI[r], wxGBPosition(2, i * COLS + 6), wxGBSpan(1, 1),
-                   wxEXPAND);
-        sizer->Add(gaLevelsO[l], wxGBPosition(2, i * COLS + 1), wxGBSpan(1, 1),
-                   wxEXPAND);
-        sizer->Add(gaLevelsO[r], wxGBPosition(2, i * COLS + 5), wxGBSpan(1, 1),
-                   wxEXPAND);
-      } else {
-        gaLevelsI[l]->Hide();
-        gaLevelsI[r]->Hide();
-        gaLevelsO[l]->Hide();
-        gaLevelsO[r]->Hide();
-        slOutputL[i]->Hide();
-        slOutputB[i]->Hide();
-        slOutputR[i]->Hide();
-      }
-    }
+      if (i == 0) {
+        wxBoxSizer *btnRow = new wxBoxSizer(wxHORIZONTAL);
+        
+        btnPhoneIcon[0] = new CustomButton(stripPanel, ID_OUTPUT_MON + 0, "", true, wxSize(14, 16), wxColour(29, 115, 201), ICON_HEADPHONE);
+        btnTRS[0] = new CustomButton(stripPanel, ID_OUTPUT_LINE + 0, "TRS", true, wxSize(14, 16));
+        
+        btnRow->Add(btnPhoneIcon[0], 1, wxEXPAND | wxRIGHT, 1);
+        btnRow->Add(btnTRS[0], 1, wxEXPAND | wxRIGHT, 1);
 
-    // 4. Toggle Buttons
-    for (size_t i = 0; i < N_OUTPUTS; i++) {
-      if (isE4x4) {
-        ckOutputMon[i] =
-            new wxToggleButton(this, ID_OUTPUT_MON + i, wxString("Mon"),
-                               wxDefaultPosition, wxDefaultSize);
-        ckOutputLine[i] =
-            new wxToggleButton(this, ID_OUTPUT_LINE + i, wxString("Line"),
-                               wxDefaultPosition, wxDefaultSize);
-        ckOutputMon[i]->SetValue(true);
-        ckOutputLine[i]->SetValue(true);
-        sizer->Add(ckOutputMon[i], wxGBPosition(3, i * COLS + 0),
-                   wxGBSpan(1, 3), wxEXPAND);
-        sizer->Add(ckOutputLine[i], wxGBPosition(3, i * COLS + 4),
-                   wxGBSpan(1, 3), wxEXPAND);
-      } else if (i == 0) {
-        // Column 0 (Output 1+2): Labeled Phones (Headphones) and Line (Line
-        // Out)
-        ckOutputMon[i] =
-            new wxToggleButton(this, ID_OUTPUT_MON + i, wxString("Phones"),
-                               wxDefaultPosition, wxDefaultSize);
-        ckOutputLine[i] =
-            new wxToggleButton(this, ID_OUTPUT_LINE + i, wxString("Line"),
-                               wxDefaultPosition, wxDefaultSize);
-        ckOutputMon[i]->SetValue(true);
-        ckOutputLine[i]->SetValue(true);
-        sizer->Add(ckOutputMon[i], wxGBPosition(3, i * COLS + 0),
-                   wxGBSpan(1, 3), wxEXPAND);
-        sizer->Add(ckOutputLine[i], wxGBPosition(3, i * COLS + 4),
-                   wxGBSpan(1, 3), wxEXPAND);
-      } else {
-        // Column 1: Labeled "MUTE" for Mobile Out
-        ckOutputMon[i] =
-            new wxToggleButton(this, ID_OUTPUT_MON + i, wxString("MUTE"),
-                               wxDefaultPosition, wxDefaultSize);
-        ckOutputLine[i] =
-            new wxToggleButton(this, ID_OUTPUT_LINE + i, wxString("Unused"),
-                               wxDefaultPosition, wxDefaultSize);
-        ckOutputMon[i]->SetValue(true);
-        ckOutputLine[i]->SetValue(true);
-        ckOutputLine[i]->Hide();
-
-        if (isOTG) {
-          sizer->Add(ckOutputMon[i], wxGBPosition(3, i * COLS + 2),
-                     wxGBSpan(1, 3), wxEXPAND);
+        if (pid != 0x8755) {
+          btnAUX[0] = new CustomButton(stripPanel, ID_OUTPUT_LINE + 1, "AUX", true, wxSize(14, 16));
+          btnRow->Add(btnAUX[0], 1, wxEXPAND);
         } else {
-          ckOutputMon[i]->Hide();
+          btnAUX[0] = nullptr;
         }
+        
+        stripSizer->Add(btnRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
+      } else {
+        // Mute Buttons Container Zone
+        wxBoxSizer *btnZoneSizer = new wxBoxSizer(wxVERTICAL);
+
+        combBtnSizer[i] = new wxBoxSizer(wxVERTICAL);
+        ckMute[i] = new CustomButton(stripPanel, ID_OUTPUT_MON + i, "MUTE", true, wxSize(36, 16), wxColour(192, 57, 43));
+        combBtnSizer[i]->Add(ckMute[i], 0, wxALIGN_CENTER);
+        btnZoneSizer->Add(combBtnSizer[i], 0, wxEXPAND);
+
+        splitBtnSizer[i] = new wxBoxSizer(wxHORIZONTAL);
+        ckMuteL[i] = new CustomButton(stripPanel, ID_OUTPUT_MON + i, "MUTE", true, wxSize(18, 16), wxColour(192, 57, 43));
+        ckMuteR[i] = new CustomButton(stripPanel, ID_OUTPUT_MON + (i + 10), "MUTE", true, wxSize(18, 16), wxColour(192, 57, 43));
+        splitBtnSizer[i]->Add(ckMuteL[i], 1, wxEXPAND | wxRIGHT, 1);
+        splitBtnSizer[i]->Add(ckMuteR[i], 1, wxEXPAND | wxLEFT, 1);
+        btnZoneSizer->Add(splitBtnSizer[i], 0, wxEXPAND);
+        splitBtnSizer[i]->Show(false); 
+
+        stripSizer->Add(btnZoneSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
       }
+
+      outLevelVal[i * 2] = LEVEL_MIN;
+      outLevelVal[i * 2 + 1] = LEVEL_MIN;
+
+      stripPanel->SetSizer(stripSizer);
+      stripPanel->SetMinSize(wxSize(120, -1));
+      stripsSizer->Add(stripPanel, 0, wxEXPAND | wxALL, 2);
     }
 
-    sizer->Add(FromDIP(16), 0, wxGBPosition(0, COLS - 1), wxGBSpan(3, 1));
-    if (isOTG || isE4x4) {
-      sizer->Add(FromDIP(16), 0, wxGBPosition(0, 2 * COLS - 1), wxGBSpan(3, 1));
-    }
-    sizer->AddGrowableRow(2, 1);
-    SetSizer(sizer);
-  };
-}; // PanelOutputs
+    stripsSizer->AddStretchSpacer(1);
 
-class PanelPhones : public wxPanel {
-public:
-  const static int32_t N_PHONES = 2;
-  wxStaticText *lbTitle[N_PHONES];
-  wxStaticText *lbTitleMix[N_PHONES];
-  wxSlider *slPhoneMix[N_PHONES];
-  wxToggleButton *ckPhoneGain[N_PHONES];
+    wxPanel *monMixPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, "monMixPanel");
+    monMixPanel->SetBackgroundColour(wxColour(33, 33, 33));
+    monMixPanel->Bind(wxEVT_PAINT, [monMixPanel](wxPaintEvent &evt) {
+      wxPaintDC dc(monMixPanel);
+      dc.SetBackground(wxBrush(wxColour(33, 33, 33)));
+      dc.Clear();
+    });
+    wxBoxSizer *monMixSizer = new wxBoxSizer(wxVERTICAL);
 
-  PanelPhones(wxWindow *parent) : wxPanel(parent, wxID_ANY) {
-    const auto MARGIN = FromDIP(8);
-    auto sizerPhones = new wxFlexGridSizer(8, 1, MARGIN, MARGIN);
+    wxStaticText *lblMonTitle = new wxStaticText(monMixPanel, wxID_ANY, "Monitor Mix", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+    lblMonTitle->SetFont(lblMonTitle->GetFont().Bold());
+    lblMonTitle->SetForegroundColour(wxColour(180, 180, 180));
+    monMixSizer->Add(lblMonTitle, 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, 4);
 
-    sizerPhones->AddGrowableCol(0);
-    for (size_t i = 0; i < N_PHONES; i++) {
-      lbTitle[i] =
-          new wxStaticText(this, wxID_ANY, std::format("Phone {}", i + 1));
-      sizerPhones->Add(lbTitle[i], 1, wxALIGN_CENTER);
+    mixKnob = new KnobControl(monMixPanel, ID_PHONE_MIX, "Mix", -100, 100, 0, wxSize(60, 70));
+    monMixSizer->Add(mixKnob, 0, wxALIGN_CENTER | wxBOTTOM, 2);
 
-      lbTitleMix[i] = new wxStaticText(
-          this, wxID_ANY, std::format("Monitor <- Phone Mix -> Play"));
-      sizerPhones->Add(lbTitleMix[i], 1, wxALIGN_CENTER);
+    wxBoxSizer *lblRow = new wxBoxSizer(wxHORIZONTAL);
+    wxStaticText *lblIn = new wxStaticText(monMixPanel, wxID_ANY, "Input");
+    lblIn->SetForegroundColour(wxColour(120, 120, 120));
+    lblIn->SetFont(lblIn->GetFont().Smaller());
+    wxStaticText *lblPlay = new wxStaticText(monMixPanel, wxID_ANY, "Playback");
+    lblPlay->SetForegroundColour(wxColour(120, 120, 120));
+    lblPlay->SetFont(lblPlay->GetFont().Smaller());
+    lblRow->Add(lblIn, 0, wxRIGHT, 10);
+    lblRow->Add(lblPlay, 0);
+    monMixSizer->Add(lblRow, 0, wxALIGN_CENTER | wxBOTTOM, 6);
 
-      slPhoneMix[i] =
-          new wxSlider(this, ID_PHONE_MIX + i, 0, -100, 100, wxDefaultPosition,
-                       wxDefaultSize, wxSL_HORIZONTAL | wxSL_LABELS);
-      slPhoneMix[i]->SetPageSize(5);
+    choicePhoneOut = new wxChoice(monMixPanel, ID_PHONE_SEL, wxDefaultPosition, wxSize(80, -1));
+    choicePhoneOut->Append("Phone 1");
+    choicePhoneOut->Append("Phone 2");
+    choicePhoneOut->SetSelection(0);
+    monMixSizer->Add(choicePhoneOut, 0, wxALIGN_CENTER | wxBOTTOM, 6);
 
-      sizerPhones->Add(slPhoneMix[i], 1, wxEXPAND);
+    lblMixVal = new wxStaticText(monMixPanel, wxID_ANY, "Level: 0dBu", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+    lblMixVal->SetForegroundColour(wxColour(140, 140, 140));
+    lblMixVal->SetFont(lblMixVal->GetFont().Smaller());
+    monMixSizer->Add(lblMixVal, 0, wxALIGN_CENTER | wxBOTTOM, 4);
 
-      ckPhoneGain[i] =
-          new wxToggleButton(this, ID_PHONE_GAIN + i, "Gain +17dB");
-      sizerPhones->Add(ckPhoneGain[i], 1, wxALIGN_RIGHT);
-    }
-    SetSizer(sizerPhones);
-  };
-}; // PanelPhones
+    btnPhoneGain = new CustomButton(monMixPanel, ID_PHONE_GAIN, "Gain", true, wxSize(50, 18), wxColour(29, 115, 201));
+    monMixSizer->Add(btnPhoneGain, 0, wxALIGN_CENTER | wxBOTTOM, 6);
 
-class PanelDevice : public wxPanel {
-public:
-  wxCheckBox *cbAutoStandby;
-  wxCheckBox *cbOTGMode;
-  wxChoice *choiceBrightness;
+    m_phoneMix[0] = 0; m_phoneMix[1] = 0;
+    m_phoneGain[0] = false; m_phoneGain[1] = false;
 
-  PanelDevice(wxWindow *parent, uint16_t pid) : wxPanel(parent, wxID_ANY) {
-    auto sizerMain = new wxBoxSizer(wxVERTICAL);
+    monMixPanel->SetSizer(monMixSizer);
+    stripsSizer->Add(monMixPanel, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 2);
 
-    auto sizerGroup = new wxStaticBoxSizer(wxVERTICAL, this, "Device Settings");
+    mainSizer->Add(stripsSizer, 1, wxEXPAND);
+    int panelWidth = numStrips * 120 + 120;
+    SetMinSize(wxSize(panelWidth, -1));
+    SetMaxSize(wxSize(panelWidth, -1));
+    SetSizer(mainSizer);
+    
+    choicePhoneOut->Bind(wxEVT_CHOICE, [this](wxCommandEvent &evt) {
+      int idx = choicePhoneOut->GetSelection();
+      if (idx == wxNOT_FOUND) return;
+      mixKnob->SetValue(m_phoneMix[idx]);
+      btnPhoneGain->SetValue(m_phoneGain[idx]);
+    });
+  }
+};
 
-    cbAutoStandby =
-        new wxCheckBox(sizerGroup->GetStaticBox(), wxID_ANY, "Auto Standby");
-    cbAutoStandby->SetValue(true);
-    sizerGroup->Add(cbAutoStandby, 0, wxALL | wxEXPAND, 8);
-
-    bool isOTG = (pid == 0x8755 || pid == 0x8756);
-    if (isOTG) {
-      cbOTGMode = new wxCheckBox(sizerGroup->GetStaticBox(), wxID_ANY,
-                                 "Mobile applications");
-      cbOTGMode->SetValue(true);
-      sizerGroup->Add(cbOTGMode, 0, wxALL | wxEXPAND, 8);
-    } else {
-      cbOTGMode = nullptr;
-    }
-
-    // LED Brightness
-    auto sizerBright = new wxBoxSizer(wxHORIZONTAL);
-    auto lblBright = new wxStaticText(sizerGroup->GetStaticBox(), wxID_ANY, "LED Brightness:");
-    choiceBrightness = new wxChoice(sizerGroup->GetStaticBox(), wxID_ANY);
-    choiceBrightness->Append("Low");
-    choiceBrightness->Append("Medium");
-    choiceBrightness->Append("High");
-    choiceBrightness->SetSelection(1); // Default Medium
-    sizerBright->Add(lblBright, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-    sizerBright->Add(choiceBrightness, 1, wxEXPAND);
-    sizerGroup->Add(sizerBright, 0, wxALL | wxEXPAND, 8);
-
-    sizerMain->Add(sizerGroup, 0, wxEXPAND | wxALL, 15);
-    SetSizer(sizerMain);
-  };
-}; // PanelDevice
+// ----------------------------------------------------------------------------
+// Main Frame redesign
+// ----------------------------------------------------------------------------
 
 class TPMixer : public wxFrame {
 public:
@@ -1287,8 +2365,6 @@ public:
   PanelMixers *panelMixers;
   PanelLoopbacks *panelLoopbacks;
   PanelOutputs *panelOutputs;
-  PanelPhones *panelPhones;
-  PanelDevice *panelDevice;
 
   TPMixer();
 
@@ -1303,118 +2379,64 @@ protected:
 
   std::thread *thReader;
   hid_device *handle;
+  
   void scbUpdateLevels(uint16_t ch16, int32_t val);
   void pushGuiStateToDevice();
-
-  void HidReader(hid_device *handle) {
-    uint8_t bufread[256];
-    uint16_t ch = 0;
-    uint64_t val;
-    int res = 0;
-    std::set<uint16_t> known{
-        0x2104,
-        0x2204,
-        0x2304,
-        0x2404,
-    };
-    for (uint16_t b = 0x41; b <= 0x48; b++) {
-      known.insert((b << 8) | 0x01);
-    }
-    for (uint16_t a = 1; a <= 2; a++) {
-      for (uint16_t b = 0x31; b <= 0x34; b++) {
-        known.insert((b << 8) | a);
-      }
-      for (uint16_t b = 0x51; b <= 0x56; b++) {
-        known.insert((b << 8) | a);
-      }
-    }
-    if (NULL != handle) {
-      printf("%s(), polling\n", __func__);
-      while ((NULL != handle) && (!toStopHidReader)) {
-        res = hid_read(handle, bufread, 16);
-        if (res < 0) {
-          printf("hid_read failed: %d\n", res);
-          break;
-        }
-        if (res > 0 && 0x22 == bufread[0]) {
-          ch = read16BE(&bufread[5]);
-          val = read32BE(&bufread[7]);
-          CallAfter(&TPMixer::scbUpdateLevels, ch, val);
-
-          uint8_t main_ch = ch >> 8;
-          uint8_t sub = ch & 0xFF;
-          bool is_level =
-              (sub == 0x04) || (main_ch >= 0x31 && main_ch <= 0x34 &&
-                                (sub == 0x01 || sub == 0x02));
-          if (!is_level) {
-            // printBuf8(bufread, 16, "<< ");
-          }
-        }
-      }
-      printf("HID Reader ended!!!!!!!!\n");
-
-    } else {
-      printf("Demonstration:\n");
-      int32_t ch = 0;
-      while (!toStopHidReader) {
-        int32_t rndv[3] = {400};
-        for (int32_t l = 0; (l < 1030) && (!toStopHidReader); l += 4) {
-          rndv[l % 3] = rand() % panelInputs->LEVEL_RANGE;
-
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
-          CallAfter(&TPMixer::scbUpdateLevels, (uint16_t)(0x2104 + (ch << 8)),
-                    (rndv[0] * rndv[1] / panelInputs->LEVEL_RANGE * rndv[2] /
-                         panelInputs->LEVEL_RANGE +
-                     panelInputs->LEVEL_MIN));
-          ch = (ch + 1) & 0x03;
-          // CallAfter (&TPMixer::scbUpdateLevels, (uint16_t)0x2204, v / 2);
-          // CallAfter (&TPMixer::scbUpdateLevels, (uint16_t)0x2304, (rndv *
-          // rndv / panelInputs->LEVEL_RANGE * rndv / panelInputs->LEVEL_RANGE +
-          // panelInputs->LEVEL_MIN)); CallAfter (&TPMixer::scbUpdateLevels,
-          // (uint16_t)0x2404, (rndv * rndv / panelInputs->LEVEL_RANGE +
-          // panelInputs->LEVEL_MIN));
-        }
-      }
-      printf("Demonstration ended.\n");
-    }
-    (void)res;
-  };
+  void HidReader(hid_device *handle);
   void startHidReader() {
     handle = hid->getHandle();
     thReader = new std::thread(&TPMixer::HidReader, this, handle);
-    // printf("Reader started.\n");
   };
 
   void setOutputVol(int32_t ch) {
     int32_t l = ch * 2;
     int32_t r = l + 1;
-    hid->setOutputVol(l,
-                      gain->getMonoGain(panelOutputs->slOutputL[ch]->GetValue(),
-                                        false, false, false, false));
-    hid->setOutputVol(r,
-                      gain->getMonoGain(panelOutputs->slOutputR[ch]->GetValue(),
-                                        false, false, false, false));
+    bool linked = panelOutputs->btnLink[ch] ? panelOutputs->btnLink[ch]->GetValue() : true;
+    bool mute = false, muteL = false, muteR = false;
+    if (ch > 0) {
+      mute = panelOutputs->ckMute[ch] ? panelOutputs->ckMute[ch]->GetValue() : false;
+      muteL = panelOutputs->ckMuteL[ch] ? panelOutputs->ckMuteL[ch]->GetValue() : false;
+      muteR = panelOutputs->ckMuteR[ch] ? panelOutputs->ckMuteR[ch]->GetValue() : false;
+    }
+    if (linked) {
+      if (panelOutputs->slOutput[ch]) {
+        hid->setOutputVol(l, gain->getMonoGain(panelOutputs->slOutput[ch]->GetValue(), mute, false, false, false));
+        hid->setOutputVol(r, gain->getMonoGain(panelOutputs->slOutput[ch]->GetValue(), mute, false, false, false));
+      }
+    } else {
+      if (panelOutputs->slOutputL[ch] && panelOutputs->slOutputR[ch]) {
+        hid->setOutputVol(l, gain->getMonoGain(panelOutputs->slOutputL[ch]->GetValue(), muteL, false, false, false));
+        hid->setOutputVol(r, gain->getMonoGain(panelOutputs->slOutputR[ch]->GetValue(), muteR, false, false, false));
+      }
+    }
   };
 
   void setLoopVol(int32_t ch) {
     int32_t l = ch * 2;
     int32_t r = l + 1;
-    hid->setLoopVol(l,
-                    gain->getMonoGain(panelLoopbacks->slOutputL[ch]->GetValue(),
-                                      panelLoopbacks->ckMute[l]->GetValue(),
-                                      false, false, false));
-    hid->setLoopVol(r,
-                    gain->getMonoGain(panelLoopbacks->slOutputR[ch]->GetValue(),
-                                      panelLoopbacks->ckMute[r]->GetValue(),
-                                      false, false, false));
+    bool linked = panelLoopbacks->btnLink[ch] ? panelLoopbacks->btnLink[ch]->GetValue() : true;
+    if (linked) {
+      bool mute = panelLoopbacks->ckMute[ch] ? panelLoopbacks->ckMute[ch]->GetValue() : false;
+      if (panelLoopbacks->slOutput[ch]) {
+        hid->setLoopVol(l, gain->getMonoGain(panelLoopbacks->slOutput[ch]->GetValue(), mute, false, false, false));
+        hid->setLoopVol(r, gain->getMonoGain(panelLoopbacks->slOutput[ch]->GetValue(), mute, false, false, false));
+      }
+    } else {
+      bool muteL = panelLoopbacks->ckMuteL[ch] ? panelLoopbacks->ckMuteL[ch]->GetValue() : false;
+      bool muteR = panelLoopbacks->ckMuteR[ch] ? panelLoopbacks->ckMuteR[ch]->GetValue() : false;
+      if (panelLoopbacks->slOutputL[ch] && panelLoopbacks->slOutputR[ch]) {
+        hid->setLoopVol(l, gain->getMonoGain(panelLoopbacks->slOutputL[ch]->GetValue(), muteL, false, false, false));
+        hid->setLoopVol(r, gain->getMonoGain(panelLoopbacks->slOutputR[ch]->GetValue(), muteR, false, false, false));
+      }
+    }
   };
-  // @return muted, phase, gainDB
+
   std::tuple<bool, bool, int32_t> gain2dB(int32_t gain32) {
     bool muted = false;
     bool phase = false;
     int32_t gainDB = 0;
     if (0 == gain32) {
-      gainDB = panelInputs->minGain; // default minimum
+      gainDB = panelInputs->minGain;
       muted = true;
     } else {
       if (gain32 < 0) {
@@ -1426,8 +2448,6 @@ protected:
     return {muted, phase, gainDB};
   }
 
-  // @return muted, phase, pan, gainDB
-  //         pan: -100 for full left, 100 for full right
   std::tuple<bool, bool, int32_t, int32_t>
   lrGain2PandB(int32_t gainL, int32_t gainR, int32_t minGain = -90) {
     bool muted = false;
@@ -1436,7 +2456,7 @@ protected:
     int32_t gainDB = 0;
     int32_t pan = 0;
     if (0 == totalGain) {
-      gainDB = panelMixers->minGain; // default minimum
+      gainDB = panelMixers->minGain;
       muted = true;
       phase = false;
       pan = 0;
@@ -1453,64 +2473,94 @@ protected:
     }
     return {muted, phase, pan, gainDB};
   }
-  // @param ch: 0..3 for channel 1..4, <0 to send all channels
+
   void sendInput(int32_t ch, bool hw = true, int16_t evtID = 0) {
     int32_t begin = ch, end = ch + 1;
     bool anySolo = false;
-    int32_t gainDB = panelInputs->slGainI[ch]->GetValue();
-    panelInputs->lbGainI[ch]->SetLabel(wxString(std::format("{:+}dB", gainDB)));
-    SetStatusText(std::format("Input gain[{}] to {}", ch + 1, gainDB));
-    for (int32_t i = 0; i < panelInputs->N_INPUTS; i++) {
-      anySolo |= panelInputs->cbSolo[i]->GetValue();
+    
+    int col = ch;
+    if (ch >= 2) col = 2; 
+
+    bool linked = (col == 2 && panelInputs->btnLink) ? panelInputs->btnLink->GetValue() : true;
+    int32_t gainDB = 0;
+    if (col < 2) {
+      if (panelInputs->slGainI[col]) gainDB = panelInputs->slGainI[col]->GetValue();
+    } else {
+      if (linked) {
+        if (panelInputs->slGainICombined) gainDB = panelInputs->slGainICombined->GetValue();
+      } else {
+        if (panelInputs->slGainI[ch]) gainDB = panelInputs->slGainI[ch]->GetValue();
+      }
     }
+    
+    for (int32_t i = 0; i < 3; i++) {
+      if (panelInputs->cbSolo[i]) {
+        anySolo |= panelInputs->cbSolo[i]->GetValue();
+      }
+    }
+    // Also include split solo keys
+    if (panelInputs->cbSoloL && panelInputs->cbSoloL->GetValue()) anySolo = true;
+    if (panelInputs->cbSoloR && panelInputs->cbSoloR->GetValue()) anySolo = true;
+    
     if (ch < 0) {
       begin = 0;
       end = panelInputs->N_INPUTS;
     }
+    
     for (int32_t i = begin; i < end; i++) {
-      // for device safety, do not restore 48V ?
-      // hid->setInput48V(i, panelInputs->cb48V[i]->GetValue());
-      hid->setInputMon(i, panelInputs->cbMon[i]->GetValue());
-      if (panelInputs->cbInst[i]) {
-        hid->setInputInst(i, panelInputs->cbInst[i]->GetValue());
+      int colMap = (i >= 2) ? 2 : i;
+      
+      bool mon = panelInputs->cbMon[colMap] ? panelInputs->cbMon[colMap]->GetValue() : false;
+      hid->setInputMon(i, mon);
+      
+      if (panelInputs->cbInst[colMap]) {
+        hid->setInputInst(i, panelInputs->cbInst[colMap]->GetValue());
       }
 
-      int32_t gainVal =
-          gain->getMonoGain(gainDB, panelInputs->cbMute[i]->GetValue(),
-                            panelInputs->cbSolo[i]->GetValue(), anySolo,
-                            panelInputs->cbPhase[i]->GetValue());
-      // printf(" gain %3d dB, %11d, %08x\n", gainDB, gainVal, gainVal);
+      bool mute = false;
+      bool solo = false;
+      bool phase = false;
+      
+      if (i < 2) {
+        if (panelInputs->cbMute[colMap]) mute = panelInputs->cbMute[colMap]->GetValue();
+        if (panelInputs->cbSolo[colMap]) solo = panelInputs->cbSolo[colMap]->GetValue();
+        if (panelInputs->cbPhase[colMap]) phase = panelInputs->cbPhase[colMap]->GetValue();
+      } else {
+        if (linked) {
+          if (panelInputs->cbMute[2]) mute = panelInputs->cbMute[2]->GetValue();
+          if (panelInputs->cbSolo[2]) solo = panelInputs->cbSolo[2]->GetValue();
+          if (panelInputs->cbPhase[2]) phase = panelInputs->cbPhase[2]->GetValue();
+        } else {
+          if (i == 2) {
+            if (panelInputs->cbMuteL) mute = panelInputs->cbMuteL->GetValue();
+            if (panelInputs->cbSoloL) solo = panelInputs->cbSoloL->GetValue();
+            if (panelInputs->cbPhaseL) phase = panelInputs->cbPhaseL->GetValue();
+          } else {
+            if (panelInputs->cbMuteR) mute = panelInputs->cbMuteR->GetValue();
+            if (panelInputs->cbSoloR) solo = panelInputs->cbSoloR->GetValue();
+            if (panelInputs->cbPhaseR) phase = panelInputs->cbPhaseR->GetValue();
+          }
+        }
+      }
+
+      int32_t loopGainDB = gainDB;
+      if (i >= 2 && !linked) {
+        if (panelInputs->slGainI[i]) loopGainDB = panelInputs->slGainI[i]->GetValue();
+      }
+
+      int32_t gainVal = gain->getMonoGain(loopGainDB, mute, solo, anySolo, phase);
       hid->setInputGainiI32(i, gainVal, hw);
 
-      // Save to settings map
-      hid->settings[0x2101 + (i << 8)] =
-          panelInputs->cbMon[i]->GetValue() ? 1 : 0;
-      if (panelInputs->cbInst[i]) {
-        hid->settings[0x2103 + (i << 8)] =
-            panelInputs->cbInst[i]->GetValue() ? 1 : 0;
+      hid->settings[0x2101 + (i << 8)] = mon ? 1 : 0;
+      if (panelInputs->cbInst[colMap]) {
+        hid->settings[0x2103 + (i << 8)] = panelInputs->cbInst[colMap]->GetValue() ? 1 : 0;
       }
       hid->settings[0x2105 + (i << 8)] = gainVal;
 
-      // Save GUI-only keys for persistence
-      hid->settings[0x2106 + (i << 8)] =
-          panelInputs->cbMute[i]->GetValue() ? 1 : 0;
-      hid->settings[0x2107 + (i << 8)] =
-          panelInputs->cbSolo[i]->GetValue() ? 1 : 0;
-      hid->settings[0x2108 + (i << 8)] =
-          panelInputs->cbPhase[i]->GetValue() ? 1 : 0;
-      hid->settings[0x2109 + (i << 8)] = gainDB;
-    }
-    if (ID_INPUT_SOLO == (evtID & 0xfff0)) {
-      printf(" processing SOLO control\n");
-      for (int32_t i = 0; i < panelInputs->N_INPUTS; i++) {
-        gainDB = panelInputs->slGainI[i]->GetValue();
-        int32_t gainVal =
-            gain->getMonoGain(gainDB, panelInputs->cbMute[i]->GetValue(),
-                              panelInputs->cbSolo[i]->GetValue(), anySolo,
-                              panelInputs->cbPhase[i]->GetValue());
-        // printf(" gain %3d dB, %11d, %08x\n", gainDB, gainVal, gainVal);
-        hid->setInputGainiI32(i, gainVal, hw);
-      }
+      hid->settings[0x2106 + (i << 8)] = mute ? 1 : 0;
+      hid->settings[0x2107 + (i << 8)] = solo ? 1 : 0;
+      hid->settings[0x2108 + (i << 8)] = phase ? 1 : 0;
+      hid->settings[0x2109 + (i << 8)] = loopGainDB;
     }
   }
 
@@ -1523,806 +2573,296 @@ protected:
   void OnLoad(wxCommandEvent &event);
   void OnSave(wxCommandEvent &event);
   void OnDeviceSave(wxCommandEvent &event);
-  void OnExit(wxCommandEvent &event);
-  void OnAbout(wxCommandEvent &event);
-  void OnDeviceToggle(wxCommandEvent &event);
-  void OnDeviceChoice(wxCommandEvent &event);
-
-  void OnUpdateLevels(wxCommandEvent &evt);
-  void OnClose(wxCloseEvent &event);
+  
+  void OnSettings(wxCommandEvent &event) {
+    SettingsDialog dlg(this, hid->pid, hid);
+    dlg.ShowModal();
+  }
 
   void OnInputGain(wxCommandEvent &event);
-  void OnInputPeak(wxCommandEvent &event);
-
   void OnMixBusSel(wxCommandEvent &event);
   void OnMixVolume(wxCommandEvent &event);
-  void OnMixToggle(wxCommandEvent &event);
-
   void OnOutputVolume(wxCommandEvent &event);
   void OnOutputToggle(wxCommandEvent &event);
-
   void OnLoopVolume(wxCommandEvent &event);
   void OnLoopToggle(wxCommandEvent &event);
-
   void OnPhoneMix(wxCommandEvent &event);
   void OnPhoneGain(wxCommandEvent &event);
-  wxDECLARE_EVENT_TABLE();
-}; // TPMixer
+  void OnClose(wxCloseEvent &event);
+  void OnInputPeak(wxCommandEvent &event);
+  void OnLinkToggle(wxCommandEvent &event);
+  void OnMixVolumeChanged(int stripIdx);
+  void RescaleUI(double scale);
+  void OnSize(wxSizeEvent &event);
+};
 
-// TODO
-wxBEGIN_EVENT_TABLE(TPMixer, wxFrame) EVT_MENU(ID_SAVE, TPMixer::OnSave) EVT_MENU(
-    ID_LOAD,
-    TPMixer::
-        OnLoad) EVT_MENU(ID_DEVICE_SAVE,
-                         TPMixer::
-                             OnDeviceSave) EVT_MENU(wxID_ABOUT,
-                                                    TPMixer::
-                                                        OnAbout) EVT_MENU(wxID_EXIT,
-                                                                          TPMixer::
-                                                                              OnExit)
+// ----------------------------------------------------------------------------
+// TPMixer constructor
+// ----------------------------------------------------------------------------
 
-    EVT_CLOSE(TPMixer::OnClose) EVT_SIZE(TPMixer::OnSize)
-
-        EVT_BUTTON(ID_INPUT_PEAK, TPMixer::OnInputPeak) EVT_BUTTON(
-            ID_INPUT_PEAK + 1,
-            TPMixer::
-                OnInputPeak) EVT_BUTTON(ID_INPUT_PEAK + 2,
-                                        TPMixer::
-                                            OnInputPeak) EVT_BUTTON(ID_INPUT_PEAK +
-                                                                        3,
-                                                                    TPMixer::
-                                                                        OnInputPeak)
-
-            EVT_SLIDER(ID_INPUT_GAIN, TPMixer::OnInputGain) EVT_SLIDER(
-                ID_INPUT_GAIN + 1,
-                TPMixer::
-                    OnInputGain) EVT_SLIDER(ID_INPUT_GAIN + 2,
-                                            TPMixer::
-                                                OnInputGain) EVT_SLIDER(ID_INPUT_GAIN +
-                                                                            3,
-                                                                        TPMixer::
-                                                                            OnInputGain)
-
-                EVT_TOGGLEBUTTON(ID_INPUT_48V, TPMixer::OnInputGain) EVT_TOGGLEBUTTON(
-                    ID_INPUT_48V + 1,
-                    TPMixer::
-                        OnInputGain) EVT_TOGGLEBUTTON(ID_INPUT_48V + 2,
-                                                      TPMixer::
-                                                          OnInputGain) EVT_TOGGLEBUTTON(ID_INPUT_48V +
-                                                                                            3,
-                                                                                        TPMixer::
-                                                                                            OnInputGain)
-
-                    EVT_TOGGLEBUTTON(ID_INPUT_MON, TPMixer::OnInputGain) EVT_TOGGLEBUTTON(ID_INPUT_MON + 1, TPMixer::OnInputGain) EVT_TOGGLEBUTTON(
-                        ID_INPUT_MON + 2,
-                        TPMixer::
-                            OnInputGain) EVT_TOGGLEBUTTON(ID_INPUT_MON + 3, TPMixer::OnInputGain)
-
-                        EVT_TOGGLEBUTTON(ID_INPUT_INST, TPMixer::OnInputGain) EVT_TOGGLEBUTTON(ID_INPUT_INST + 1, TPMixer::OnInputGain) EVT_TOGGLEBUTTON(
-                            ID_INPUT_INST +
-                                2,
-                            TPMixer::
-                                OnInputGain) EVT_TOGGLEBUTTON(ID_INPUT_INST + 3, TPMixer::OnInputGain)
-
-                            EVT_TOGGLEBUTTON(ID_INPUT_SOLO, TPMixer::OnInputGain) EVT_TOGGLEBUTTON(
-                                ID_INPUT_SOLO +
-                                    1,
-                                TPMixer::OnInputGain)
-                                EVT_TOGGLEBUTTON(ID_INPUT_SOLO + 2, TPMixer::OnInputGain) EVT_TOGGLEBUTTON(
-                                    ID_INPUT_SOLO +
-                                        3,
-                                    TPMixer::OnInputGain)
-
-                                    EVT_TOGGLEBUTTON(ID_INPUT_MUTE, TPMixer::OnInputGain) EVT_TOGGLEBUTTON(
-                                        ID_INPUT_MUTE +
-                                            1,
-                                        TPMixer::
-                                            OnInputGain) EVT_TOGGLEBUTTON(ID_INPUT_MUTE +
-                                                                              2,
-                                                                          TPMixer::OnInputGain)
-                                        EVT_TOGGLEBUTTON(ID_INPUT_MUTE + 3,
-                                                         TPMixer::OnInputGain)
-
-                                            EVT_TOGGLEBUTTON(ID_INPUT_PHASE, TPMixer::OnInputGain) EVT_TOGGLEBUTTON(
-                                                ID_INPUT_PHASE + 1,
-                                                TPMixer::
-                                                    OnInputGain) EVT_TOGGLEBUTTON(ID_INPUT_PHASE +
-                                                                                      2,
-                                                                                  TPMixer::OnInputGain)
-                                                EVT_TOGGLEBUTTON(
-                                                    ID_INPUT_PHASE + 3,
-                                                    TPMixer::OnInputGain)
-
-                                                    EVT_RADIOBOX(
-                                                        ID_MIX_BUS_SEL,
-                                                        TPMixer::OnMixBusSel)
-
-                                                        EVT_SLIDER(ID_MIX_VOL, TPMixer::OnMixVolume) EVT_SLIDER(
-                                                            ID_MIX_VOL + 1,
-                                                            TPMixer::
-                                                                OnMixVolume)
-                                                            EVT_SLIDER(ID_MIX_VOL + 2, TPMixer::OnMixVolume) EVT_SLIDER(
-                                                                ID_MIX_VOL + 3,
-                                                                TPMixer::
-                                                                    OnMixVolume)
-                                                                EVT_SLIDER(ID_MIX_VOL + 4, TPMixer::OnMixVolume) EVT_SLIDER(
-                                                                    ID_MIX_VOL +
-                                                                        5,
-                                                                    TPMixer::
-                                                                        OnMixVolume)
-                                                                    EVT_SLIDER(
-                                                                        ID_MIX_VOL +
-                                                                            6,
-                                                                        TPMixer::
-                                                                            OnMixVolume)
-                                                                        EVT_SLIDER(
-                                                                            ID_MIX_VOL +
-                                                                                7,
-                                                                            TPMixer::
-                                                                                OnMixVolume)
-                                                                            EVT_SLIDER(
-                                                                                ID_MIX_VOL +
-                                                                                    8,
-                                                                                TPMixer::
-                                                                                    OnMixVolume)
-                                                                                EVT_SLIDER(
-                                                                                    ID_MIX_VOL +
-                                                                                        9,
-                                                                                    TPMixer::
-                                                                                        OnMixVolume)
-                                                                                    EVT_SLIDER(
-                                                                                        ID_MIX_VOL +
-                                                                                            10,
-                                                                                        TPMixer::
-                                                                                            OnMixVolume)
-                                                                                        EVT_SLIDER(
-                                                                                            ID_MIX_VOL +
-                                                                                                11,
-                                                                                            TPMixer::
-                                                                                                OnMixVolume)
-                                                                                            EVT_SLIDER(
-                                                                                                ID_MIX_VOL +
-                                                                                                    12,
-                                                                                                TPMixer::
-                                                                                                    OnMixVolume)
-
-                                                                                                EVT_SLIDER(ID_MIX_PAN, TPMixer::OnMixVolume) EVT_SLIDER(ID_MIX_PAN + 1, TPMixer::OnMixVolume) EVT_SLIDER(ID_MIX_PAN +
-                                                                                                                                                                                                             2,
-                                                                                                                                                                                                         TPMixer::
-                                                                                                                                                                                                             OnMixVolume) EVT_SLIDER(ID_MIX_PAN + 3, TPMixer::OnMixVolume) EVT_SLIDER(ID_MIX_PAN + 4,
-                                                                                                                                                                                                                                                                                      TPMixer::OnMixVolume) EVT_SLIDER(ID_MIX_PAN +
-                                                                                                                                                                                                                                                                                                                           5,
-                                                                                                                                                                                                                                                                                                                       TPMixer::OnMixVolume) EVT_SLIDER(ID_MIX_PAN + 6, TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                            OnMixVolume) EVT_SLIDER(ID_MIX_PAN + 7, TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                                                                        OnMixVolume) EVT_SLIDER(ID_MIX_PAN +
-                                                                                                                                                                                                                                                                                                                                                                                                                                                    8,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                                                                                                    OnMixVolume) EVT_SLIDER(ID_MIX_PAN +
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                9,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                            TPMixer::OnMixVolume) EVT_SLIDER(ID_MIX_PAN + 10, TPMixer::OnMixVolume) EVT_SLIDER(ID_MIX_PAN + 11, TPMixer::OnMixVolume) EVT_SLIDER(ID_MIX_PAN + 12, TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      OnMixVolume)
-
-                                                                                                    EVT_SLIDER(ID_MIX_VOL_B, TPMixer::
-                                                                                                                                 OnMixVolume) EVT_SLIDER(ID_MIX_VOL_B + 1, TPMixer::
-                                                                                                                                                                               OnMixVolume) EVT_SLIDER(ID_MIX_VOL_B + 2, TPMixer::OnMixVolume) EVT_SLIDER(ID_MIX_VOL_B + 3, TPMixer::OnMixVolume) EVT_SLIDER(ID_MIX_VOL_B + 4, TPMixer::OnMixVolume) EVT_SLIDER(ID_MIX_VOL_B +
-                                                                                                                                                                                                                                                                                                                                                                    5,
-                                                                                                                                                                                                                                                                                                                                                                TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                    OnMixVolume)
-
-                                                                                                        EVT_TOGGLEBUTTON(ID_MIX_SOLO, TPMixer::OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_SOLO + 1, TPMixer::OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_SOLO +
-                                                                                                                                                                                                                                         2,
-                                                                                                                                                                                                                                     TPMixer::
-                                                                                                                                                                                                                                         OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_SOLO + 3, TPMixer::
-                                                                                                                                                                                                                                                                                            OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_SOLO +
-                                                                                                                                                                                                                                                                                                                              4,
-                                                                                                                                                                                                                                                                                                                          TPMixer::
-                                                                                                                                                                                                                                                                                                                              OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_SOLO +
-                                                                                                                                                                                                                                                                                                                                                                5,
-                                                                                                                                                                                                                                                                                                                                                            TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_SOLO + 6, TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                                                                   OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_SOLO + 7, TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                      OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_SOLO +
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        8,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_SOLO + 9, TPMixer::OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_SOLO + 10, TPMixer::OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_SOLO +
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           11,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           OnMixVolume)
-
-                                                                                                            EVT_TOGGLEBUTTON(
-                                                                                                                ID_MIX_MUTE,
-                                                                                                                TPMixer::
-                                                                                                                    OnMixVolume)
-                                                                                                                EVT_TOGGLEBUTTON(ID_MIX_MUTE + 1, TPMixer::
-                                                                                                                                                      OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_MUTE + 2, TPMixer::
-                                                                                                                                                                                                         OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_MUTE + 3, TPMixer::
-                                                                                                                                                                                                                                                            OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_MUTE + 4, TPMixer::
-                                                                                                                                                                                                                                                                                                               OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_MUTE +
-                                                                                                                                                                                                                                                                                                                                                 5,
-                                                                                                                                                                                                                                                                                                                                             TPMixer::
-                                                                                                                                                                                                                                                                                                                                                 OnMixVolume)
-                                                                                                                    EVT_TOGGLEBUTTON(
-                                                                                                                        ID_MIX_MUTE +
-                                                                                                                            6,
-                                                                                                                        TPMixer::
-                                                                                                                            OnMixVolume)
-                                                                                                                        EVT_TOGGLEBUTTON(
-                                                                                                                            ID_MIX_MUTE +
-                                                                                                                                7,
-                                                                                                                            TPMixer::
-                                                                                                                                OnMixVolume)
-                                                                                                                            EVT_TOGGLEBUTTON(
-                                                                                                                                ID_MIX_MUTE +
-                                                                                                                                    8,
-                                                                                                                                TPMixer::
-                                                                                                                                    OnMixVolume)
-                                                                                                                                EVT_TOGGLEBUTTON(ID_MIX_MUTE +
-                                                                                                                                                     9,
-                                                                                                                                                 TPMixer::
-                                                                                                                                                     OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_MUTE + 10, TPMixer::
-                                                                                                                                                                                                         OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_MUTE +
-                                                                                                                                                                                                                                           11,
-                                                                                                                                                                                                                                       TPMixer::
-                                                                                                                                                                                                                                           OnMixVolume)
-
-                                                                                                                                    EVT_TOGGLEBUTTON(ID_MIX_PHASE,
-                                                                                                                                                     TPMixer::
-                                                                                                                                                         OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_PHASE + 1, TPMixer::
-                                                                                                                                                                                                             OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_PHASE + 2, TPMixer::
-                                                                                                                                                                                                                                                                 OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_PHASE + 3, TPMixer::OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_PHASE + 4,
-                                                                                                                                                                                                                                                                                                                                                        TPMixer::OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_PHASE + 5, TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                                                                     OnMixVolume)
-                                                                                                                                        EVT_TOGGLEBUTTON(ID_MIX_PHASE + 6, TPMixer::
-                                                                                                                                                                               OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_PHASE + 7, TPMixer::
-                                                                                                                                                                                                                                   OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_PHASE + 8, TPMixer::
-                                                                                                                                                                                                                                                                                       OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_PHASE +
-                                                                                                                                                                                                                                                                                                                         9,
-                                                                                                                                                                                                                                                                                                                     TPMixer::
-                                                                                                                                                                                                                                                                                                                         OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_PHASE + 10, TPMixer::OnMixVolume) EVT_TOGGLEBUTTON(ID_MIX_PHASE + 11, TPMixer::
-                                                                                                                                                                                                                                                                                                                                                                                                                                        OnMixVolume)
-
-                                                                                                                                            EVT_COMBOBOX(
-                                                                                                                                                ID_OUTPUT_SEL,
-                                                                                                                                                TPMixer::
-                                                                                                                                                    OnOutputToggle)
-                                                                                                                                                EVT_COMBOBOX(
-                                                                                                                                                    ID_OUTPUT_SEL +
-                                                                                                                                                        1,
-                                                                                                                                                    TPMixer::
-                                                                                                                                                        OnOutputToggle)
-
-                                                                                                                                                    EVT_SLIDER(
-                                                                                                                                                        ID_OUTPUT_VOL_L,
-                                                                                                                                                        TPMixer::
-                                                                                                                                                            OnOutputVolume)
-                                                                                                                                                        EVT_SLIDER(
-                                                                                                                                                            ID_OUTPUT_VOL_L +
-                                                                                                                                                                1,
-                                                                                                                                                            TPMixer::
-                                                                                                                                                                OnOutputVolume)
-
-                                                                                                                                                            EVT_SLIDER(
-                                                                                                                                                                ID_OUTPUT_VOL_B, TPMixer::
-                                                                                                                                                                                     OnOutputVolume) EVT_SLIDER(ID_OUTPUT_VOL_B +
-                                                                                                                                                                                                                    1,
-                                                                                                                                                                                                                TPMixer::OnOutputVolume)
-
-                                                                                                                                                                EVT_SLIDER(
-                                                                                                                                                                    ID_OUTPUT_VOL_R,
-                                                                                                                                                                    TPMixer::
-                                                                                                                                                                        OnOutputVolume)
-                                                                                                                                                                    EVT_SLIDER(
-                                                                                                                                                                        ID_OUTPUT_VOL_R +
-                                                                                                                                                                            1,
-                                                                                                                                                                        TPMixer::
-                                                                                                                                                                            OnOutputVolume)
-
-                                                                                                                                                                        EVT_TOGGLEBUTTON(ID_OUTPUT_MON,
-                                                                                                                                                                                         TPMixer::OnOutputToggle) EVT_TOGGLEBUTTON(ID_OUTPUT_MON +
-                                                                                                                                                                                                                                       1,
-                                                                                                                                                                                                                                   TPMixer::
-                                                                                                                                                                                                                                       OnOutputToggle)
-
-                                                                                                                                                                            EVT_TOGGLEBUTTON(
-                                                                                                                                                                                ID_OUTPUT_LINE,
-                                                                                                                                                                                TPMixer::
-                                                                                                                                                                                    OnOutputToggle)
-                                                                                                                                                                                EVT_TOGGLEBUTTON(
-                                                                                                                                                                                    ID_OUTPUT_LINE +
-                                                                                                                                                                                        1,
-                                                                                                                                                                                    TPMixer::
-                                                                                                                                                                                        OnOutputToggle)
-
-    // Loopback events
-    EVT_COMBOBOX(ID_LOOP_SEL, TPMixer::OnLoopToggle)
-        EVT_COMBOBOX(ID_LOOP_SEL + 1,
-                     TPMixer::OnLoopToggle) EVT_COMBOBOX(ID_LOOP_SEL + 2,
-                                                         TPMixer::OnLoopToggle)
-
-            EVT_SLIDER(ID_LOOP_VOL_L, TPMixer::OnLoopVolume) EVT_SLIDER(
-                ID_LOOP_VOL_L + 1,
-                TPMixer::OnLoopVolume) EVT_SLIDER(ID_LOOP_VOL_L + 2,
-                                                  TPMixer::OnLoopVolume)
-
-                EVT_SLIDER(ID_LOOP_VOL_B, TPMixer::OnLoopVolume) EVT_SLIDER(
-                    ID_LOOP_VOL_B +
-                        1,
-                    TPMixer::OnLoopVolume) EVT_SLIDER(ID_LOOP_VOL_B + 2,
-                                                      TPMixer::OnLoopVolume)
-
-                    EVT_SLIDER(ID_LOOP_VOL_R, TPMixer::OnLoopVolume) EVT_SLIDER(
-                        ID_LOOP_VOL_R +
-                            1,
-                        TPMixer::OnLoopVolume) EVT_SLIDER(ID_LOOP_VOL_R + 2,
-                                                          TPMixer::OnLoopVolume)
-
-                        EVT_TOGGLEBUTTON(
-                            ID_LOOP_MUTE,
-                            TPMixer::
-                                OnLoopToggle) EVT_TOGGLEBUTTON(ID_LOOP_MUTE + 1,
-                                                               TPMixer::OnLoopToggle)
-                            EVT_TOGGLEBUTTON(ID_LOOP_MUTE + 2,
-                                             TPMixer::OnLoopToggle)
-                                EVT_TOGGLEBUTTON(ID_LOOP_MUTE + 3,
-                                                 TPMixer::OnLoopToggle)
-                                    EVT_TOGGLEBUTTON(ID_LOOP_MUTE + 4,
-                                                     TPMixer::OnLoopToggle)
-                                        EVT_TOGGLEBUTTON(ID_LOOP_MUTE + 5,
-                                                         TPMixer::OnLoopToggle)
-
-                                            EVT_SLIDER(
-                                                ID_PHONE_MIX,
-                                                TPMixer::OnPhoneMix)
-                                                EVT_SLIDER(
-                                                    ID_PHONE_MIX +
-                                                        1,
-                                                    TPMixer::OnPhoneMix)
-
-                                                    EVT_TOGGLEBUTTON(
-                                                        ID_PHONE_GAIN,
-                                                        TPMixer::OnPhoneGain)
-                                                        EVT_TOGGLEBUTTON(
-                                                            ID_PHONE_GAIN + 1,
-                                                            TPMixer::
-                                                                OnPhoneGain)
-                                                            wxEND_EVENT_TABLE();
-
-void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
-  uint8_t ch = ch16 >> 8;
-  uint8_t subCh = ch16 & 0xff;
-  int32_t siVal = val;
-  int32_t level01DB = siVal; // It is 0.1dB  // / 50000;
-  int32_t cls = ch & 0xf0;
-  // printf("%d: %04x %08x\n", __LINE__, ch16, val);
-  switch (cls) {
-  case 0x10:
-  {
-    if (ch == 0x11) {
-      if (subCh == 1) {
-        panelDevice->cbAutoStandby->SetValue(val ? true : false);
-        hid->settings[0x1101] = val;
-      } else if (subCh == 3) {
-        if (panelDevice->cbOTGMode) {
-          panelDevice->cbOTGMode->SetValue(val ? true : false);
-        }
-        hid->settings[0x1103] = val;
-      }
-    } else if (ch == 0x10 && subCh == 0x0a) {
-      if (val >= 0 && val <= 2) {
-        panelDevice->choiceBrightness->SetSelection(val);
-      }
-      hid->settings[0x100a] = val;
-    }
-    break;
-  }
-  case 0x20: // input levels
-  {
-    int32_t logicCh = ch - 0x21;
-    int32_t vGauge = level01DB - panelInputs->LEVEL_MIN;
-    switch (subCh) {
-    case 0x01:
-      panelInputs->cbMon[logicCh]->SetValue(val);
-      hid->settings[0x2101 + (logicCh << 8)] = val;
-      break;
-    case 0x02:
-      panelInputs->cb48V[logicCh]->SetValue(val);
-      hid->settings[0x2102 + (logicCh << 8)] = val;
-      break;
-    case 0x03:
-      if (panelInputs->cbInst[logicCh]) {
-        panelInputs->cbInst[logicCh]->SetValue(val);
-      }
-      hid->settings[0x2103 + (logicCh << 8)] = val;
-      break;
-    case 0x04:
-      if (vGauge < 0) {
-        vGauge = 0;
-      } else if (vGauge > panelInputs->LEVEL_RANGE) {
-        vGauge = panelInputs->LEVEL_RANGE;
-      }
-      if (level01DB > panelInputs->PeaksI[logicCh]) {
-        panelInputs->PeaksI[logicCh] = level01DB;
-        panelInputs->lbPeaksI[logicCh]->SetLabel(
-            wxString(std::format("{:+.1f}", level01DB * 0.1)));
-      }
-      panelInputs->gaLevels[logicCh]->SetValue(vGauge);
-
-      vGauge = level01DB - panelMixers->LEVEL_MIN;
-      if (vGauge < 0) {
-        vGauge = 0;
-      } else if (vGauge > panelMixers->LEVEL_RANGE) {
-        vGauge = panelInputs->LEVEL_RANGE;
-      }
-      if (level01DB > panelMixers->PeaksI[logicCh]) {
-        panelMixers->PeaksI[logicCh] = level01DB;
-        // panelMixers->lbPeaksI[logicCh]->SetLabel(wxString(std::format("{:+.1f}",
-        // level01DB * 0.1)));
-      }
-      panelMixers->gaLevel[logicCh]->SetValue(vGauge);
-      break;
-    case 0x05: // gain
-      if (hid->pid == 0x8754) {
-        int32_t gainDB = 0;
-        if (0 == val) {
-          gainDB = panelInputs->minGain;
-          panelInputs->cbMute[logicCh]->SetValue(true);
-        } else {
-          if (val < 0) {
-            val = -val;
-            panelInputs->cbPhase[logicCh]->SetValue(true);
-          } else {
-            panelInputs->cbPhase[logicCh]->SetValue(false);
-          }
-          panelInputs->cbMute[logicCh]->SetValue(false);
-          gainDB = round(log10((double)val / (double)0x02000000) * 20);
-        }
-        panelInputs->slGainI[logicCh]->SetValue(gainDB);
-      }
-      break;
-    case 0x06: // MUTE (GUI-only)
-      panelInputs->cbMute[logicCh]->SetValue(val ? true : false);
-      hid->settings[0x2106 + (logicCh << 8)] = val;
-      break;
-    case 0x07: // SOLO (GUI-only)
-      panelInputs->cbSolo[logicCh]->SetValue(val ? true : false);
-      hid->settings[0x2107 + (logicCh << 8)] = val;
-      break;
-    case 0x08: // PHASE (GUI-only)
-      panelInputs->cbPhase[logicCh]->SetValue(val ? true : false);
-      hid->settings[0x2108 + (logicCh << 8)] = val;
-      break;
-    case 0x09: // Slider Gain (GUI-only)
-      panelInputs->slGainI[logicCh]->SetValue(val);
-      panelInputs->lbGainI[logicCh]->SetLabel(
-          wxString(std::format("{:+}dB", val)));
-      hid->settings[0x2109 + (logicCh << 8)] = val;
-      break;
-    default:
-      break;
-    } // switch subch
-  } break;
-  // Output levels!
-  // channel: 0x31..0x34 for 1L, 1R, 2L, 2R;
-  // subch 0x01,0x02: 01 for Output level, 02 for source Level
-  case 0x30: {
-    int32_t vGauge = level01DB - panelOutputs->LEVEL_MIN;
-    int32_t logicCh = ch - 0x31;
-    int32_t index = logicCh * 2 + subCh - 1;
-    if (logicCh < 0 || logicCh >= 10)
-      return;
-    if (subCh < 1 || subCh > 4)
-      return;
-    switch (logicCh) {
-    case 0x04:
-    case 0x05:
-      // phones
-      switch (subCh) {
-      case 1: // output source
-        if (val <= 0 || val >= 15)
-          break;
-        printf("select output[%1d] source %1d\n", logicCh - 4, val);
-        panelOutputs->cbSelect[logicCh - 4]->SetSelection(val - 1);
-        break;
-      case 2: // phone gain boost
-        printf("set phone[%1d] gain %1d\n", logicCh - 4, val);
-        panelPhones->ckPhoneGain[logicCh - 4]->SetValue(val);
-        hid->settings[0x3502 + ((logicCh - 4) << 8)] = val;
-        break;
-      case 3: // phone mix
-      {
-        int phoneMix = (val - 50) * 2;
-        printf("set phone[%1d] gain %1d\n", logicCh - 4, phoneMix);
-        panelPhones->slPhoneMix[logicCh - 4]->SetValue(phoneMix);
-      } break;
-      } // phone/output control
-      break;
-    case 0x06: // 37, output control
-    {
-      int16_t lSubCh = subCh - 1;
-      if (0 == (lSubCh / 2)) { // 1, 2
-        panelOutputs->ckOutputMon[lSubCh % 2]->SetValue(val);
-      } else {
-        panelOutputs->ckOutputLine[lSubCh % 2]->SetValue(val);
-      }
-      printf("set output control [%1d] gain %1d\n", lSubCh, val);
-    } break;
-    case 0x08: // 0x39, Auto Standby
-      if (subCh == 1) {
-        panelDevice->cbAutoStandby->SetValue(val ? true : false);
-        hid->settings[0x3901] = val;
-      }
-      break;
-    case 0x09: // 0x3a, OTG Mode / Mobile Port
-      if (subCh == 1 && panelDevice->cbOTGMode) {
-        panelDevice->cbOTGMode->SetValue(val ? true : false);
-        hid->settings[0x3a01] = val;
-      }
-      break;
-    default: // 0..3: level meter
-      if (logicCh < 0 || logicCh >= panelOutputs->N_OUTPUTS * 2)
-        break;
-      switch (subCh) {
-      case 1: // output level meter after fader
-      case 2: // output level meter before fader
-        if (vGauge < 0) {
-          vGauge = 0;
-        } else if (vGauge > panelOutputs->LEVEL_RANGE) {
-          vGauge = panelOutputs->LEVEL_RANGE;
-        }
-        if (level01DB > panelOutputs->PeaksI[logicCh]) {
-          panelOutputs->PeaksI[index] = level01DB;
-          // panelMixers->btPeaksI[logicCh]->SetLabel(wxString(std::format("{:+.1f}",
-          // level01DB * 0.1)));
-        }
-        // TODO  what about sub ch 02?
-        if (1 == subCh) {
-          panelOutputs->gaLevelsO[logicCh]->SetValue(vGauge);
-        } else {
-          panelOutputs->gaLevelsI[logicCh]->SetValue(vGauge);
-        }
-        break;
-      case 3: // output volume
-      {
-        // phone mix
-        auto [muted, dummy, gainDB] = gain2dB(val);
-        printf("set pohone[%1d] gain %1d\n", logicCh, val);
-        // panelOutputs->ckMute[logicCh]->setValue(muted);
-        if (0 == (logicCh % 2)) {
-          panelOutputs->slOutputL[logicCh / 2]->SetValue(gainDB);
-        } else {
-          panelOutputs->slOutputR[logicCh / 2]->SetValue(gainDB);
-        }
-      } break;
-      }
-      break;
-    }
-  } break;   // class output/phone
-  case 0x40: // playback levels, saw 0x41..0x48, subch always 0x01
-  {
-    int32_t vGauge = level01DB - panelMixers->LEVEL_MIN;
-    int32_t logicBus = ch - 0x41;
-    int32_t logicCh = subCh - 1;
-    if (logicCh < 0 || logicCh > 8)
-      return;
-    if (subCh != 1)
-      return;
-    // printf("level ch  0x%02x, %5.1fdB\n", ch16, level01DB * 0.1);
-    if (vGauge < 0) {
-      vGauge = 0;
-    } else if (vGauge > panelMixers->LEVEL_RANGE) {
-      vGauge = panelMixers->LEVEL_RANGE;
-    }
-    if (level01DB > panelMixers->PeaksI[logicCh]) {
-      panelMixers->PeaksI[logicBus + 4] = level01DB;
-      // panelMixers->btPeaksI[logicCh]->SetLabel(wxString(std::format("{:+.1f}",
-      // level01DB * 0.1)));
-    }
-    panelMixers->gaLevel[logicBus + 4]->SetValue(vGauge);
-  } break; // class playback
-  // Loopback levels, saw 0x55..0x56, subch  0x01,0x02
-  // Loopback source selction: 0x57..0x59
-  case 0x50: {
-    int32_t vGauge = level01DB - panelOutputs->LEVEL_MIN;
-    int32_t logicCh = ch - 0x51;
-    int32_t indexMeter = logicCh * 2 + logicCh;
-    int32_t gainDB = 0;
-    if (logicCh < 0 || logicCh > 9)
-      return;
-    if (subCh < 1 || subCh > 5)
-      return;
-    if (vGauge < 0) {
-      vGauge = 0;
-    } else if (vGauge > panelOutputs->LEVEL_RANGE) {
-      vGauge = panelOutputs->LEVEL_RANGE;
-    }
-    if (level01DB > panelOutputs->PeaksI[logicCh]) {
-      panelOutputs->PeaksI[indexMeter] = level01DB;
-      // panelOutputs->btPeaksI[logicCh]->SetLabel(wxString(std::format("{:+.1f}",
-      // level01DB * 0.1)));
-    }
-
-    if (logicCh < 6) {
-      // level meter
-      // printf("level ch  0x%02x, %5.1fdB\n", ch16, level01DB * 0.1);
-      switch (subCh) {
-      case 1:
-        panelLoopbacks->gaLevelsO[logicCh]->SetValue(vGauge);
-        break;
-      case 2:
-        panelLoopbacks->gaLevelsI[logicCh]->SetValue(vGauge);
-        break;
-      case 3: // volume
-        if (0 == val) {
-          gainDB = panelLoopbacks->minGain;
-          panelLoopbacks->ckMute[logicCh]->SetValue(true);
-          printf("%d:\n", __LINE__);
-        } else {
-          if (val < 0) {
-            val = -val;
-            // no phase control
-            // panelLoopbacks->cbPhase[logicCh]->SetValue(true);
-          }
-          panelLoopbacks->ckMute[logicCh]->SetValue(false);
-          gainDB = round(log10((double)val / (double)0x02000000) * 20);
-          // printf("%d: %9.6f  %4d\n", __LINE__, (double)val /
-          // (double)0x02000000, gainDB);
-        }
-        printf("%d: level ch 0x%02x, L/R %d, val %08x,  %4ddB\n", __LINE__,
-               ch16, logicCh % 2, val, gainDB);
-        if (0 == (logicCh % 2)) { // left
-          panelLoopbacks->slOutputL[logicCh / 2]->SetValue(gainDB);
-        } else {
-          panelLoopbacks->slOutputR[logicCh / 2]->SetValue(gainDB);
-        }
-        break;
-      }
-    } else {
-      // source select
-      if (logicCh - 6 >= 0 && logicCh - 6 < panelLoopbacks->N_LOOPBACKS) {
-        panelLoopbacks->cbSelect[logicCh - 6]->SetSelection(val - 1);
-      }
-    }
-  } break;
-  case 0x60: {
-    int32_t logicCh = ch - 0x61;
-    if (logicCh < 0 || logicCh >= 8)
-      return;
-    if (subCh < 1 || subCh > 12)
-      return;
-    hid->settings[ch16] = val;
-  } break;
-  default:
-    printf("level ch  0x%02x, %5.1fdB\n", ch16, level01DB * 0.1);
-    break;
-  } // switch class
-}
-
-bool MyApp::OnInit() {
-  TPMixer *frame = new TPMixer();
-  frame->Show(true);
-  return true;
-}
-
-TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "Topping E4X4 Mixer") {
-#if 1
-  wxMenu *menuFile = new wxMenu;
-  wxMenu *menuHelp = new wxMenu;
-  wxMenu *menuDevice = new wxMenu;
-
-  menuFile->Append(ID_SAVE, "&Save Status\tCtrl-S");
-  menuFile->Append(ID_LOAD, "&Load Status\tCtrl-L");
-  menuFile->AppendSeparator();
-  menuFile->Append(wxID_EXIT);
-
-  menuDevice->Append(ID_DEVICE_SAVE, "&Save Defaults");
-
-  menuHelp->Append(wxID_ABOUT, "About\tF1");
-
-  wxMenuBar *menuBar = new wxMenuBar;
-  menuBar->Append(menuFile, "&File");
-  menuBar->Append(menuDevice, "&Device");
-  menuBar->Append(menuHelp, "&Help");
-  SetMenuBar(menuBar);
-#endif
-
+TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "TOPPING Professional Control Center", wxDefaultPosition, wxDefaultSize) {
+  SetBackgroundColour(wxColour(17, 17, 17));
+  Bind(wxEVT_PAINT, [this](wxPaintEvent &evt) {
+    wxPaintDC dc(this);
+    dc.SetBackground(wxBrush(wxColour(17, 17, 17)));
+    dc.Clear();
+  });
+  Bind(wxEVT_SIZE, &TPMixer::OnSize, this);
+  
   std::string home = getenv("HOME");
   dir1 = home + pathSep + dirConfig;
   dir2 = dir1 + pathSep + dirApp;
   fileCfg = dir2 + pathSep + ConfigFile;
 
-  CreateStatusBar();
-
   hid = new ToppingHID();
-  if (NULL != hid->getHandle()) {
-    std::string deviceName = "Topping E4X4";
-    if (hid->pid == 0x8755) {
-      deviceName = "Topping E1X2 OTG";
-    } else if (hid->pid == 0x8752) {
-      deviceName = "Topping E2X2";
-    } else if (hid->pid == 0x8756) {
-      deviceName = "Topping E2X2 OTG";
-    }
-    SetStatusText(deviceName + " HID device opened.");
-    SetTitle(deviceName + " Mixer");
-  }
   gain = new Gain();
 
-  Bind(wxEVT_MENU, &TPMixer::OnAbout, this, wxID_ABOUT);
-  Bind(wxEVT_MENU, &TPMixer::OnExit, this, wxID_EXIT);
-
-  SetMinSize(wxSize(820, 500));
-
-  auto mainSizer = new wxBoxSizer(wxVERTICAL);
-
-  auto book = new wxNotebook(this, wxID_ANY);
-
-  panelInputs = new PanelInputs(book, hid->numInputs, hid->pid);
-  panelMixers = new PanelMixers(book, hid->pid);
-  panelLoopbacks = new PanelLoopbacks(book);
-  panelOutputs = new PanelOutputs(book, hid->pid);
-  panelPhones = new PanelPhones(book);
-  panelDevice = new PanelDevice(book, hid->pid);
-
-  panelDevice->cbAutoStandby->Bind(wxEVT_CHECKBOX, &TPMixer::OnDeviceToggle,
-                                   this);
-  if (panelDevice->cbOTGMode) {
-    panelDevice->cbOTGMode->Bind(wxEVT_CHECKBOX, &TPMixer::OnDeviceToggle,
-                                 this);
+  if (NULL != hid->getHandle()) {
+    std::string deviceName = "Topping E4X4";
+    if (hid->pid == 0x8755) deviceName = "Topping E1X2 OTG";
+    else if (hid->pid == 0x8752) deviceName = "Topping E2X2";
+    else if (hid->pid == 0x8756) deviceName = "Topping E2X2 OTG";
+    SetTitle(deviceName + " Control Center");
   }
-  panelDevice->choiceBrightness->Bind(wxEVT_CHOICE, &TPMixer::OnDeviceChoice,
-                                      this);
 
-  // Dynamic Labels for Input 3+4
-  // Dynamic Labels & Feature Hiding for Input 3+4 & Output/Phones
-  if (hid->pid == 0x8755 || hid->pid == 0x8756) {
-    panelMixers->lbTitle[1]->SetLabel("Mobile In");
-    panelPhones->lbTitle[1]->SetLabel("Mobile Out");
-    panelPhones->ckPhoneGain[1]->Hide();
+  wxBoxSizer *mainSizer = new wxBoxSizer(wxVERTICAL);
 
-    // Hide Phase in Mixer tab
-    for (int i = 0; i < panelMixers->N_MIX_SRCS; ++i) {
-      panelMixers->ckPhase[i]->Hide();
+  // 1. TOP HEADER PANEL
+  wxPanel *headerPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, 32));
+  headerPanel->SetBackgroundColour(wxColour(44, 44, 44));
+  headerPanel->Bind(wxEVT_PAINT, [headerPanel](wxPaintEvent &evt) {
+    wxPaintDC dc(headerPanel);
+    dc.SetBackground(wxBrush(wxColour(44, 44, 44)));
+    dc.Clear();
+  });
+  wxBoxSizer *headerSizer = new wxBoxSizer(wxHORIZONTAL);
+
+  wxStaticText *logoText = new wxStaticText(headerPanel, wxID_ANY, "TOPPING ");
+  logoText->SetForegroundColour(*wxWHITE);
+  logoText->SetFont(logoText->GetFont().Bold().Larger());
+  headerSizer->Add(logoText, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 10);
+
+  wxStaticText *profText = new wxStaticText(headerPanel, wxID_ANY, "Professional");
+  profText->SetForegroundColour(wxColour(160, 160, 160));
+  headerSizer->Add(profText, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+
+  CustomButton *btnSettings = new CustomButton(headerPanel, ID_SETTINGS, "", false, wxSize(20, 20), wxColour(29, 115, 201), ICON_GEAR);
+  headerSizer->Add(btnSettings, 0, wxALIGN_CENTER_VERTICAL);
+
+  headerSizer->Add(0, 0, 1, wxEXPAND);
+
+  wxStaticText *lblWork = new wxStaticText(headerPanel, wxID_ANY, "Workspace | ");
+  lblWork->SetForegroundColour(wxColour(140, 140, 140));
+  headerSizer->Add(lblWork, 0, wxALIGN_CENTER_VERTICAL);
+  
+  wxStaticText *valWork = new wxStaticText(headerPanel, wxID_ANY, "New20260716  ");
+  valWork->SetForegroundColour(*wxWHITE);
+  headerSizer->Add(valWork, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
+
+  CustomButton *btnSave = new CustomButton(headerPanel, ID_SAVE, "", false, wxSize(20, 20), wxColour(29, 115, 201), ICON_SAVE);
+  CustomButton *btnLoad = new CustomButton(headerPanel, ID_LOAD, "", false, wxSize(20, 20), wxColour(29, 115, 201), ICON_DOWNLOAD);
+  headerSizer->Add(btnSave, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+  headerSizer->Add(btnLoad, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
+
+  headerPanel->SetSizer(headerSizer);
+  mainSizer->Add(headerPanel, 0, wxEXPAND);
+
+  // 2. MAIN GRID WITH BALANCED COLUMNS
+  panelInputs = new PanelInputs(this, hid->numInputs, hid->pid);
+  panelMixers = new PanelMixers(this, hid->pid);
+  panelLoopbacks = new PanelLoopbacks(this, hid->pid);
+  panelOutputs = new PanelOutputs(this, hid->pid);
+
+  int leftWidth = (hid->pid == 0x8754) ? 400 : (((hid->pid == 0x8752 || hid->pid == 0x8756) ? 280 : 180));
+
+  panelInputs->SetMinSize(wxSize(leftWidth, -1));
+  panelInputs->SetMaxSize(wxSize(leftWidth, -1));
+  panelLoopbacks->SetMinSize(wxSize(leftWidth, -1));
+  panelLoopbacks->SetMaxSize(wxSize(leftWidth, -1));
+
+  wxBoxSizer *col1 = new wxBoxSizer(wxVERTICAL);
+  col1->Add(panelInputs, 1, wxEXPAND | wxBOTTOM, 2);
+  col1->Add(panelLoopbacks, 1, wxEXPAND);
+  
+  wxBoxSizer *col2 = new wxBoxSizer(wxVERTICAL);
+  col2->Add(panelMixers, 1, wxEXPAND | wxBOTTOM, 2);
+  col2->Add(panelOutputs, 1, wxEXPAND);
+  
+  wxBoxSizer *contentSizer = new wxBoxSizer(wxHORIZONTAL);
+  contentSizer->Add(col1, 0, wxEXPAND | wxRIGHT, 2);
+  contentSizer->Add(col2, 0, wxEXPAND);
+  contentSizer->AddStretchSpacer(1);
+
+  mainSizer->Add(contentSizer, 1, wxEXPAND | wxALL, 2);
+  SetSizer(mainSizer);
+
+  // leftWidth is already computed above
+  int rightWidth = 680;
+  int totalWidth = leftWidth + rightWidth + 24;
+  int totalHeight = 580;
+
+  SetMinSize(wxSize(totalWidth, totalHeight));
+  SetSize(wxSize(totalWidth, totalHeight));
+
+  btnSettings->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnSettings, this); 
+  btnSave->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnSave, this);
+  btnLoad->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLoad, this);
+
+  int numCols = (hid->pid == 0x8754) ? 3 : ((hid->pid == 0x8752 || hid->pid == 0x8756) ? 2 : 1);
+  for (int col = 0; col < numCols; ++col) {
+    if (col < 2) {
+      if (panelInputs->cbMon[col]) panelInputs->cbMon[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cb48V[col]) panelInputs->cb48V[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbInst[col]) panelInputs->cbInst[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->slGainI[col]) panelInputs->slGainI[col]->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbSolo[col]) panelInputs->cbSolo[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbMute[col]) panelInputs->cbMute[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbPhase[col]) panelInputs->cbPhase[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+    } else {
+      if (panelInputs->slGainI[2]) panelInputs->slGainI[2]->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain, this);
+      if (panelInputs->slGainI[3]) panelInputs->slGainI[3]->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain, this);
+      if (panelInputs->slGainICombined) panelInputs->slGainICombined->Bind(wxEVT_SLIDER, &TPMixer::OnInputGain, this);
+      if (panelInputs->btnLink) panelInputs->btnLink->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLinkToggle, this);
+      
+      // Bind Input split controls
+      if (panelInputs->cbSoloL) panelInputs->cbSoloL->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbSoloR) panelInputs->cbSoloR->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbMuteL) panelInputs->cbMuteL->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbMuteR) panelInputs->cbMuteR->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbPhaseL) panelInputs->cbPhaseL->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbPhaseR) panelInputs->cbPhaseR->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+
+      // Combined
+      if (panelInputs->cbSolo[2]) panelInputs->cbSolo[2]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbMute[2]) panelInputs->cbMute[2]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+      if (panelInputs->cbPhase[2]) panelInputs->cbPhase[2]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputGain, this);
+    }
+    if (panelInputs->lbPeaksI[col]) panelInputs->lbPeaksI[col]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnInputPeak, this);
+  }
+
+  for (int i = 0; i < panelMixers->N_MIXERS; ++i) {
+    if (panelMixers->tabButtons[i]) {
+      panelMixers->tabButtons[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) {
+        for (int t = 0; t < panelMixers->N_MIXERS; ++t) {
+          if (panelMixers->tabButtons[t]) panelMixers->tabButtons[t]->SetValue(t == i);
+        }
+        wxCommandEvent fakeEvt(wxEVT_RADIOBOX, ID_MIX_BUS_SEL);
+        fakeEvt.SetInt(i);
+        this->OnMixBusSel(fakeEvt);
+      });
+    }
+  }
+
+  // Robust Lambda Event Bindings for Mixer channels
+  for (int i = 0; i < panelMixers->N_MIX_SRCS / 2; ++i) {
+    int l = i * 2;
+    int r = l + 1;
+    
+    if (panelMixers->slPan[l]) {
+      panelMixers->slPan[l]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+    if (panelMixers->slPan[r]) {
+      panelMixers->slPan[r]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
     }
 
-    // Hide unsupported controls in Input tab
-    for (int i = 0; i < hid->numInputs; ++i) {
-      panelInputs->cbMute[i]->Hide();
-      panelInputs->cbSolo[i]->Hide();
-      panelInputs->cbPhase[i]->Hide();
-      panelInputs->slGainI[i]->Hide();
-      panelInputs->lbGainI[i]->Hide();
+    if (panelMixers->slVol[i]) {
+      panelMixers->slVol[i]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+    if (panelMixers->slVolL[i]) {
+      panelMixers->slVolL[i]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+    if (panelMixers->slVolR[i]) {
+      panelMixers->slVolR[i]->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+
+    if (panelMixers->btnLink[i]) {
+      panelMixers->btnLink[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLinkToggle, this);
+    }
+
+    if (panelMixers->ckSolo[i]) {
+      panelMixers->ckSolo[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+    if (panelMixers->ckMute[i]) {
+      panelMixers->ckMute[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+    if (panelMixers->ckPhaseCombined[i]) {
+      panelMixers->ckPhaseCombined[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+
+    if (panelMixers->ckSoloL[i]) {
+      panelMixers->ckSoloL[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+    if (panelMixers->ckSoloR[i]) {
+      panelMixers->ckSoloR[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+    if (panelMixers->ckMuteL[i]) {
+      panelMixers->ckMuteL[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+    if (panelMixers->ckMuteR[i]) {
+      panelMixers->ckMuteR[i]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+
+    if (panelMixers->ckPhase[l]) {
+      panelMixers->ckPhase[l]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+    if (panelMixers->ckPhase[r]) {
+      panelMixers->ckPhase[r]->Bind(wxEVT_TOGGLEBUTTON, [this, i](wxCommandEvent &evt) { this->OnMixVolumeChanged(i); });
+    }
+  }
+
+  for (int i = 0; i < panelLoopbacks->N_LOOPBACKS; ++i) {
+    if (panelLoopbacks->cbSelect[i]) panelLoopbacks->cbSelect[i]->Bind(wxEVT_COMBOBOX, &TPMixer::OnLoopToggle, this);
+    if (panelLoopbacks->slOutput[i]) panelLoopbacks->slOutput[i]->Bind(wxEVT_SLIDER, &TPMixer::OnLoopVolume, this);
+    if (panelLoopbacks->slOutputL[i]) panelLoopbacks->slOutputL[i]->Bind(wxEVT_SLIDER, &TPMixer::OnLoopVolume, this);
+    if (panelLoopbacks->slOutputR[i]) panelLoopbacks->slOutputR[i]->Bind(wxEVT_SLIDER, &TPMixer::OnLoopVolume, this);
+    if (panelLoopbacks->btnLink[i]) panelLoopbacks->btnLink[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLinkToggle, this);
+    if (panelLoopbacks->ckMute[i]) panelLoopbacks->ckMute[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLoopToggle, this);
+    if (panelLoopbacks->ckMuteL[i]) panelLoopbacks->ckMuteL[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLoopToggle, this);
+    if (panelLoopbacks->ckMuteR[i]) panelLoopbacks->ckMuteR[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLoopToggle, this);
+  }
+
+  int numOuts = (hid->pid == 0x8752) ? 1 : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
+  for (int i = 0; i < numOuts; ++i) {
+    if (panelOutputs->cbSelect[i]) panelOutputs->cbSelect[i]->Bind(wxEVT_COMBOBOX, &TPMixer::OnOutputToggle, this);
+    if (panelOutputs->slOutput[i]) panelOutputs->slOutput[i]->Bind(wxEVT_SLIDER, &TPMixer::OnOutputVolume, this);
+    if (panelOutputs->slOutputL[i]) panelOutputs->slOutputL[i]->Bind(wxEVT_SLIDER, &TPMixer::OnOutputVolume, this);
+    if (panelOutputs->slOutputR[i]) panelOutputs->slOutputR[i]->Bind(wxEVT_SLIDER, &TPMixer::OnOutputVolume, this);
+    if (panelOutputs->btnLink[i]) panelOutputs->btnLink[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnLinkToggle, this);
+    if (i == 0) {
+      if (panelOutputs->btnPhoneIcon[0]) panelOutputs->btnPhoneIcon[0]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
+      if (panelOutputs->btnTRS[0]) panelOutputs->btnTRS[0]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
+      if (panelOutputs->btnAUX[0]) panelOutputs->btnAUX[0]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
+    } else {
+      if (panelOutputs->ckMute[i]) panelOutputs->ckMute[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
+      if (panelOutputs->ckMuteL[i]) panelOutputs->ckMuteL[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
+      if (panelOutputs->ckMuteR[i]) panelOutputs->ckMuteR[i]->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnOutputToggle, this);
+    }
+  }
+
+  if (panelOutputs->mixKnob) panelOutputs->mixKnob->Bind(wxEVT_SLIDER, &TPMixer::OnPhoneMix, this);
+  if (panelOutputs->btnPhoneGain) panelOutputs->btnPhoneGain->Bind(wxEVT_TOGGLEBUTTON, &TPMixer::OnPhoneGain, this);
+
+  Bind(wxEVT_CLOSE_WINDOW, &TPMixer::OnClose, this);
+
+  // PID-specific label customizations and control hiding
+  if (hid->pid == 0x8755 || hid->pid == 0x8756) {
+    if (panelMixers->lbTitle[0]) panelMixers->lbTitle[0]->SetLabel("IN 1");
+    if (panelMixers->lbTitle[1]) panelMixers->lbTitle[1]->SetLabel("Mobile In");
+    for (int i = 0; i < panelMixers->N_MIX_SRCS; ++i) {
+      if (panelMixers->ckPhase[i]) panelMixers->ckPhase[i]->Hide();
+    }
+    for (int i = 0; i < panelMixers->N_MIX_SRCS / 2; ++i) {
+      if (panelMixers->ckPhaseCombined[i]) panelMixers->ckPhaseCombined[i]->Hide();
     }
   } else if (hid->pid == 0x8752) {
-    panelMixers->lbTitle[1]->SetLabel("Unused");
-
-    panelPhones->lbTitle[1]->SetLabel("Unused");
-    panelPhones->ckPhoneGain[1]->Hide();
-    panelPhones->slPhoneMix[1]->Hide();
-
-    // Hide Phase in Mixer tab
+    if (panelMixers->lbTitle[1]) panelMixers->lbTitle[1]->SetLabel("Unused");
     for (int i = 0; i < panelMixers->N_MIX_SRCS; ++i) {
-      panelMixers->ckPhase[i]->Hide();
+      if (panelMixers->ckPhase[i]) panelMixers->ckPhase[i]->Hide();
     }
-
-    // Hide unsupported controls in Input tab
-    for (int i = 0; i < hid->numInputs; ++i) {
-      panelInputs->cbMute[i]->Hide();
-      panelInputs->cbSolo[i]->Hide();
-      panelInputs->cbPhase[i]->Hide();
-      panelInputs->slGainI[i]->Hide();
-      panelInputs->lbGainI[i]->Hide();
+    for (int i = 0; i < panelMixers->N_MIX_SRCS / 2; ++i) {
+      if (panelMixers->ckPhaseCombined[i]) panelMixers->ckPhaseCombined[i]->Hide();
     }
   }
-
-  book->AddPage(panelInputs, "Input");
-  book->AddPage(panelMixers, "Mix");
-  book->AddPage(panelLoopbacks, "Loopback");
-  book->AddPage(panelOutputs, "Output");
-  book->AddPage(panelPhones, "Phones");
-  book->AddPage(panelDevice, "Device");
-
-  mainSizer->Add(book, 1, wxEXPAND | wxALL, 8);
-  SetSizer(mainSizer);
 
   loadSettings();
   startHidReader();
@@ -2335,33 +2875,418 @@ TPMixer::TPMixer() : wxFrame(nullptr, wxID_ANY, "Topping E4X4 Mixer") {
   }
 }
 
-void createDir(const std::string path) {
-  printf("checking dir '%s'\n", path.c_str());
-  if (!std::filesystem::exists(path)) { // Check if src folder exists
-    printf("creating '%s'\n", path.c_str());
-    try {
-      std::filesystem::create_directory(path); // create src folder
-    } catch (std::exception &e) {
-      std::cout << e.what();
+// ----------------------------------------------------------------------------
+// scbUpdateLevels callback routing
+// ----------------------------------------------------------------------------
+
+void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
+  uint8_t ch = ch16 >> 8;
+  uint8_t subCh = ch16 & 0xff;
+  int32_t level01DB = val;
+  int32_t cls = ch & 0xf0;
+
+  switch (cls) {
+  case 0x10:
+    break;
+  case 0x20: 
+  {
+    int32_t logicCh = ch - 0x21;
+    int32_t vGauge = level01DB - panelInputs->LEVEL_MIN;
+    int colMap = (logicCh >= 2) ? 2 : logicCh;
+    bool inputLinked = (panelInputs->btnLink) ? panelInputs->btnLink->GetValue() : true;
+
+    switch (subCh) {
+    case 0x01:
+      if (panelInputs->cbMon[colMap]) {
+        panelInputs->cbMon[colMap]->SetValue(val);
+      }
+      hid->settings[0x2101 + (logicCh << 8)] = val;
+      break;
+    case 0x02:
+      if (panelInputs->cb48V[colMap]) {
+        panelInputs->cb48V[colMap]->SetValue(val);
+      }
+      hid->settings[0x2102 + (logicCh << 8)] = val;
+      break;
+    case 0x03:
+      if (panelInputs->cbInst[colMap]) {
+        panelInputs->cbInst[colMap]->SetValue(val);
+      }
+      hid->settings[0x2103 + (logicCh << 8)] = val;
+      break;
+    case 0x04: 
+      if (vGauge < 0) vGauge = 0;
+      else if (vGauge > panelInputs->LEVEL_RANGE) vGauge = panelInputs->LEVEL_RANGE;
+      
+      panelInputs->inLevelVal[logicCh] = level01DB;
+      if (logicCh < 2) {
+        if (panelInputs->slGainI[logicCh]) {
+          panelInputs->slGainI[logicCh]->SetMeterLevels(level01DB, -960);
+        }
+        if (level01DB > panelInputs->PeaksI[logicCh]) {
+          panelInputs->PeaksI[logicCh] = level01DB;
+          if (panelInputs->lbPeaksI[logicCh]) {
+            panelInputs->lbPeaksI[logicCh]->SetLabel(std::format("{:+.1f}", level01DB * 0.1));
+          }
+        }
+      } else {
+        if (inputLinked) {
+          if (panelInputs->slGainICombined) {
+            panelInputs->slGainICombined->SetMeterLevels(panelInputs->inLevelVal[2], panelInputs->inLevelVal[3]);
+          }
+        } else {
+          if (panelInputs->slGainI[2]) {
+            panelInputs->slGainI[2]->SetMeterLevels(panelInputs->inLevelVal[2], -960);
+          }
+          if (panelInputs->slGainI[3]) {
+            panelInputs->slGainI[3]->SetMeterLevels(panelInputs->inLevelVal[3], -960);
+          }
+        }
+        if (level01DB > panelInputs->PeaksI[2]) {
+          panelInputs->PeaksI[2] = level01DB;
+          if (panelInputs->lbPeaksI[2]) {
+            panelInputs->lbPeaksI[2]->SetLabel(std::format("{:+.1f}", level01DB * 0.1));
+          }
+        }
+      }
+      
+      panelMixers->mixLevelVal[logicCh] = level01DB;
+      if (logicCh < 2) {
+        bool mixLinked0 = panelMixers->btnLink[0] ? panelMixers->btnLink[0]->GetValue() : true;
+        if (mixLinked0) {
+          if (panelMixers->slVol[0]) {
+            panelMixers->slVol[0]->SetMeterLevels(panelMixers->mixLevelVal[0], panelMixers->mixLevelVal[1]);
+          }
+        } else {
+          if (panelMixers->slVolL[0]) panelMixers->slVolL[0]->SetMeterLevels(panelMixers->mixLevelVal[0], -960);
+          if (panelMixers->slVolR[0]) panelMixers->slVolR[0]->SetMeterLevels(panelMixers->mixLevelVal[1], -960);
+        }
+      } else {
+        bool mixLinked1 = panelMixers->btnLink[1] ? panelMixers->btnLink[1]->GetValue() : true;
+        if (mixLinked1) {
+          if (panelMixers->slVol[1]) {
+            panelMixers->slVol[1]->SetMeterLevels(panelMixers->mixLevelVal[2], panelMixers->mixLevelVal[3]);
+          }
+        } else {
+          if (panelMixers->slVolL[1]) panelMixers->slVolL[1]->SetMeterLevels(panelMixers->mixLevelVal[2], -960);
+          if (panelMixers->slVolR[1]) panelMixers->slVolR[1]->SetMeterLevels(panelMixers->mixLevelVal[3], -960);
+        }
+      }
+      break;
+    case 0x05: 
+      if (hid->pid == 0x8754) {
+        auto [muted, phase, gainDB] = gain2dB(val);
+        if (colMap < 2) {
+          if (panelInputs->slGainI[colMap]) panelInputs->slGainI[colMap]->SetValue(gainDB);
+        } else {
+          if (inputLinked) {
+            if (panelInputs->slGainICombined) panelInputs->slGainICombined->SetValue(gainDB);
+          } else {
+            if (panelInputs->slGainI[logicCh]) panelInputs->slGainI[logicCh]->SetValue(gainDB);
+          }
+        }
+        if (panelInputs->cbMute[colMap]) panelInputs->cbMute[colMap]->SetValue(muted);
+        if (panelInputs->cbPhase[colMap]) panelInputs->cbPhase[colMap]->SetValue(phase);
+        if (panelInputs->lbGainVal[colMap]) {
+          panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} dB", gainDB));
+        }
+      }
+      break;
+    case 0x06:
+      if (panelInputs->cbMute[colMap]) panelInputs->cbMute[colMap]->SetValue(val ? true : false);
+      hid->settings[0x2106 + (logicCh << 8)] = val;
+      break;
+    case 0x07:
+      if (panelInputs->cbSolo[colMap]) panelInputs->cbSolo[colMap]->SetValue(val ? true : false);
+      hid->settings[0x2107 + (logicCh << 8)] = val;
+      break;
+    case 0x08:
+      if (panelInputs->cbPhase[colMap]) panelInputs->cbPhase[colMap]->SetValue(val ? true : false);
+      hid->settings[0x2108 + (logicCh << 8)] = val;
+      break;
+    case 0x09:
+      if (colMap < 2) {
+        if (panelInputs->slGainI[colMap]) panelInputs->slGainI[colMap]->SetValue(val);
+      } else {
+        if (inputLinked) {
+          if (panelInputs->slGainICombined) panelInputs->slGainICombined->SetValue(val);
+        } else {
+          if (panelInputs->slGainI[logicCh]) panelInputs->slGainI[logicCh]->SetValue(val);
+        }
+      }
+      if (panelInputs->lbGainVal[colMap]) {
+        panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} dB", val));
+      }
+      hid->settings[0x2109 + (logicCh << 8)] = val;
+      break;
+    }
+  } break;
+  case 0x30: 
+  {
+    int32_t vGauge = level01DB - panelOutputs->LEVEL_MIN;
+    int32_t logicCh = ch - 0x31;
+    if (logicCh < 0 || logicCh >= 10) return;
+    
+    switch (logicCh) {
+    case 0x04:
+    case 0x05:
+      {
+        int phoneIdx = logicCh - 4;
+        if (subCh == 2) {
+          panelOutputs->m_phoneGain[phoneIdx] = val ? true : false;
+          if (panelOutputs->choicePhoneOut->GetSelection() == phoneIdx) {
+            if (panelOutputs->btnPhoneGain) panelOutputs->btnPhoneGain->SetValue(val ? true : false);
+          }
+          hid->settings[0x3502 + (phoneIdx << 8)] = val;
+        } else if (subCh == 3) {
+          int phoneMix = (val - 50) * 2;
+          panelOutputs->m_phoneMix[phoneIdx] = phoneMix;
+          if (panelOutputs->choicePhoneOut->GetSelection() == phoneIdx) {
+            if (panelOutputs->mixKnob) panelOutputs->mixKnob->SetValue(phoneMix);
+          }
+        }
+      }
+      break;
+    case 0x06: 
+      if (subCh == 1 || subCh == 2) {
+        if (panelOutputs->btnPhoneIcon[0]) panelOutputs->btnPhoneIcon[0]->SetValue(val); 
+      } else {
+        if (panelOutputs->btnTRS[0]) panelOutputs->btnTRS[0]->SetValue(val);
+      }
+      break;
+    default: 
+      if (logicCh < 6) {
+        if (vGauge < 0) vGauge = 0;
+        else if (vGauge > panelOutputs->LEVEL_RANGE) vGauge = panelOutputs->LEVEL_RANGE;
+        
+        panelOutputs->outLevelVal[logicCh] = level01DB;
+        int strip = logicCh / 2;
+        bool outLinked = panelOutputs->btnLink[strip] ? panelOutputs->btnLink[strip]->GetValue() : true;
+        if (outLinked) {
+          if (panelOutputs->slOutput[strip]) {
+            panelOutputs->slOutput[strip]->SetMeterLevels(panelOutputs->outLevelVal[strip * 2], panelOutputs->outLevelVal[strip * 2 + 1]);
+          }
+        } else {
+          if (panelOutputs->slOutputL[strip]) panelOutputs->slOutputL[strip]->SetMeterLevels(panelOutputs->outLevelVal[strip * 2], -960);
+          if (panelOutputs->slOutputR[strip]) panelOutputs->slOutputR[strip]->SetMeterLevels(panelOutputs->outLevelVal[strip * 2 + 1], -960);
+        }
+      }
+      break;
+    }
+  } break;
+  case 0x40: 
+  {
+    int32_t vGauge = level01DB - panelMixers->LEVEL_MIN;
+    int32_t logicBus = ch - 0x41; 
+    if (vGauge < 0) vGauge = 0;
+    else if (vGauge > panelMixers->LEVEL_RANGE) vGauge = panelMixers->LEVEL_RANGE;
+    
+    int stripIdx = 2 + (logicBus / 2); 
+    if (stripIdx < 6) {
+      panelMixers->mixLevelVal[logicBus + 4] = level01DB;
+      bool mixLinked = panelMixers->btnLink[stripIdx] ? panelMixers->btnLink[stripIdx]->GetValue() : true;
+      if (mixLinked) {
+        if (panelMixers->slVol[stripIdx]) {
+          panelMixers->slVol[stripIdx]->SetMeterLevels(panelMixers->mixLevelVal[stripIdx * 2], panelMixers->mixLevelVal[stripIdx * 2 + 1]);
+        }
+      } else {
+        if (panelMixers->slVolL[stripIdx]) panelMixers->slVolL[stripIdx]->SetMeterLevels(panelMixers->mixLevelVal[stripIdx * 2], -960);
+        if (panelMixers->slVolR[stripIdx]) panelMixers->slVolR[stripIdx]->SetMeterLevels(panelMixers->mixLevelVal[stripIdx * 2 + 1], -960);
+      }
+    }
+  } break;
+  case 0x50: 
+  {
+    int32_t vGauge = level01DB - panelOutputs->LEVEL_MIN;
+    int32_t logicCh = ch - 0x51;
+    if (logicCh < 6) {
+      if (subCh == 1) { 
+        if (vGauge < 0) vGauge = 0;
+        else if (vGauge > panelOutputs->LEVEL_RANGE) vGauge = panelOutputs->LEVEL_RANGE;
+        
+        panelLoopbacks->loopLevelVal[logicCh] = level01DB;
+        int strip = logicCh / 2;
+        bool loopLinked = panelLoopbacks->btnLink[strip] ? panelLoopbacks->btnLink[strip]->GetValue() : true;
+        if (loopLinked) {
+          if (panelLoopbacks->slOutput[strip]) {
+            panelLoopbacks->slOutput[strip]->SetMeterLevels(panelLoopbacks->loopLevelVal[strip * 2], panelLoopbacks->loopLevelVal[strip * 2 + 1]);
+          }
+        } else {
+          if (panelLoopbacks->slOutputL[strip]) panelLoopbacks->slOutputL[strip]->SetMeterLevels(panelLoopbacks->loopLevelVal[strip * 2], -960);
+          if (panelLoopbacks->slOutputR[strip]) panelLoopbacks->slOutputR[strip]->SetMeterLevels(panelLoopbacks->loopLevelVal[strip * 2 + 1], -960);
+        }
+      } else if (subCh == 3) { 
+        auto [muted, dummy, gainDB] = gain2dB(val);
+        int strip = logicCh / 2;
+        bool loopLinked = panelLoopbacks->btnLink[strip] ? panelLoopbacks->btnLink[strip]->GetValue() : true;
+        if (loopLinked) {
+          if (panelLoopbacks->slOutput[strip]) panelLoopbacks->slOutput[strip]->SetValue(gainDB);
+        } else {
+          if (logicCh % 2 == 0) {
+            if (panelLoopbacks->slOutputL[strip]) panelLoopbacks->slOutputL[strip]->SetValue(gainDB);
+          } else {
+            if (panelLoopbacks->slOutputR[strip]) panelLoopbacks->slOutputR[strip]->SetValue(gainDB);
+          }
+        }
+      }
+    } else { 
+      int loopIdx = logicCh - 6;
+      if (loopIdx >= 0 && loopIdx < panelLoopbacks->N_LOOPBACKS) {
+        if (panelLoopbacks->cbSelect[loopIdx]) {
+          panelLoopbacks->cbSelect[loopIdx]->SetSelection(val - 1);
+        }
+      }
+    }
+  } break;
+  case 0x60:
+    hid->settings[ch16] = val;
+    break;
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Thread reader polling
+// ----------------------------------------------------------------------------
+
+void TPMixer::HidReader(hid_device *handle) {
+  uint8_t bufread[256];
+  uint16_t ch = 0;
+  uint64_t val;
+  int res = 0;
+  if (NULL != handle) {
+    while ((NULL != handle) && (!toStopHidReader)) {
+      res = hid_read(handle, bufread, 16);
+      if (res < 0) {
+        break;
+      }
+      if (res > 0 && 0x22 == bufread[0]) {
+        ch = read16BE(&bufread[5]);
+        val = read32BE(&bufread[7]);
+        CallAfter(&TPMixer::scbUpdateLevels, ch, val);
+      }
+    }
+  } else {
+    while (!toStopHidReader) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      int activeCols = (hid->pid == 0x8754) ? 3 : 2;
+      for (int i = 0; i < activeCols; ++i) {
+        int valLeft = panelInputs->LEVEL_MIN + rand() % (panelInputs->LEVEL_RANGE);
+        CallAfter(&TPMixer::scbUpdateLevels, (uint16_t)(0x2104 + (i << 8)), valLeft);
+      }
+      for (int i = 0; i < 6; ++i) {
+        int valPlay = panelMixers->LEVEL_MIN + rand() % (panelMixers->LEVEL_RANGE);
+        CallAfter(&TPMixer::scbUpdateLevels, (uint16_t)(0x4101 + (i << 8)), valPlay);
+      }
     }
   }
 }
 
-void TPMixer::saveSettings() {
+void ScaleUIElements(wxWindow *win, double scale) {
+  if (!win) return;
 
+  if (auto btn = dynamic_cast<CustomButton*>(win)) {
+    btn->Rescale(scale);
+  } else if (auto knob = dynamic_cast<KnobControl*>(win)) {
+    knob->Rescale(scale);
+  } else if (auto meter = dynamic_cast<LevelMeter*>(win)) {
+    meter->Rescale(scale);
+  } else if (auto strip = dynamic_cast<FaderStrip*>(win)) {
+    strip->Rescale(scale);
+  } else if (auto txt = dynamic_cast<wxStaticText*>(win)) {
+    double baseSize = 8.5;
+    wxString lbl = txt->GetLabel();
+    if (txt->GetFont().GetWeight() == wxFONTWEIGHT_BOLD) {
+      baseSize = 9.5;
+      if (lbl.Contains("TOPPING") || lbl.Contains("Professional")) {
+        baseSize = 13.0;
+      }
+    } else if (txt->GetFont().GetFractionalPointSize() < 8.0) {
+      baseSize = 7.0;
+    }
+    wxFont f = txt->GetFont();
+    f.SetFractionalPointSize(baseSize * scale);
+    txt->SetFont(f);
+  } else if (auto choice = dynamic_cast<wxChoice*>(win)) {
+    wxFont f = choice->GetFont();
+    f.SetFractionalPointSize(8.5 * scale);
+    choice->SetFont(f);
+  } else if (auto cb = dynamic_cast<wxComboBox*>(win)) {
+    wxFont f = cb->GetFont();
+    f.SetFractionalPointSize(8.5 * scale);
+    cb->SetFont(f);
+  }
+
+  if (win->GetName() == "colPanel" || win->GetName() == "stripPanel" || win->GetName() == "monMixPanel") {
+    win->SetMinSize(wxSize(120 * scale, -1));
+    if (win->GetName() == "monMixPanel") {
+      win->SetMaxSize(wxSize(120 * scale, -1));
+    }
+  }
+
+  wxWindowList &children = win->GetChildren();
+  for (wxWindowList::iterator it = children.begin(); it != children.end(); ++it) {
+    ScaleUIElements(*it, scale);
+  }
+}
+
+void TPMixer::RescaleUI(double scale) {
+  int leftWidth = (hid->pid == 0x8754) ? 400 : (((hid->pid == 0x8752 || hid->pid == 0x8756) ? 280 : 180));
+  int rightWidth = 680;
+  
+  panelInputs->SetMinSize(wxSize(leftWidth * scale, -1));
+  panelInputs->SetMaxSize(wxSize(leftWidth * scale, -1));
+  
+  panelLoopbacks->SetMinSize(wxSize(leftWidth * scale, -1));
+  panelLoopbacks->SetMaxSize(wxSize(leftWidth * scale, -1));
+  
+  panelMixers->SetMinSize(wxSize(rightWidth * scale, -1));
+  panelMixers->SetMaxSize(wxSize(rightWidth * scale, -1));
+  
+  int numOutStrips = (hid->pid == 0x8752) ? 1 : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
+  int outputPanelWidth = numOutStrips * 120 + 120;
+  panelOutputs->SetMinSize(wxSize(outputPanelWidth * scale, -1));
+  panelOutputs->SetMaxSize(wxSize(outputPanelWidth * scale, -1));
+
+  int totalWidth = (leftWidth + rightWidth + 24) * scale;
+  int totalHeight = 580 * scale;
+  SetMinSize(wxSize(totalWidth, totalHeight));
+
+  ScaleUIElements(this, scale);
+
+  Layout();
+  Refresh();
+}
+
+void TPMixer::OnSize(wxSizeEvent &event) {
+  wxSize size = GetClientSize();
+  int leftWidth = (hid->pid == 0x8754) ? 400 : (((hid->pid == 0x8752 || hid->pid == 0x8756) ? 280 : 180));
+  int rightWidth = 680;
+  int designWidth = leftWidth + rightWidth + 24;
+  int designHeight = 580;
+
+  double scaleX = (double)size.x / designWidth;
+  double scaleY = (double)size.y / designHeight;
+  double newScale = std::min(scaleX, scaleY);
+  if (newScale < 0.5) newScale = 0.5;
+  if (newScale > 3.0) newScale = 3.0;
+
+  if (std::abs(newScale - g_uiScale) > 0.02) {
+    g_uiScale = newScale;
+    RescaleUI(g_uiScale);
+  }
+  event.Skip();
+}
+
+void TPMixer::saveSettings() {
   createDir(dir1);
   createDir(dir2);
   FILE *f = fopen(fileCfg.c_str(), "w");
-
   if (NULL != f) {
-    printf("Setting file opened. Saving...\n");
+    hid->settings[0x9999] = (int32_t)(g_uiScale * 100.0);
     for (const auto &[key, value] : hid->settings) {
       fprintf(f, "%04x %08x\n", key, value);
     }
-    printf("Finished\n");
     fclose(f);
-  } else {
-    printf("Fail to open settings file.\n");
   }
 }
 
@@ -2373,435 +3298,379 @@ void TPMixer::loadSettings() {
   ssize_t n;
   size_t len = 0;
   char *line = NULL;
+  g_uiScale = 1.0;
   if (NULL != f) {
-    printf("setting file opened. reading...\n");
     while ((n = getline(&line, &len, f)) != -1) {
       sscanf(line, "%" SCNx16 " %" SCNx32, &key, &value);
-      printf("0x%04x 0x%08x\n", key, value);
-      hid->settings[key] = value;
-      // TODO check class/channel...
-      CallAfter(&TPMixer::scbUpdateLevels, key, value);
+      if (key == 0x9999) {
+        g_uiScale = (double)value / 100.0;
+      } else {
+        hid->settings[key] = value;
+        CallAfter(&TPMixer::scbUpdateLevels, key, value);
+      }
     }
-    printf("Finished\n");
-    if (NULL != line) {
-      free(line);
-    }
+    if (NULL != line) free(line);
     fclose(f);
     CallAfter(&TPMixer::refreshMixerUi, -1);
     CallAfter(&TPMixer::refreshLoopbackUi);
     CallAfter(&TPMixer::refreshOutputUi);
-  } else {
-    printf("Fail to open settings file.\n");
+    if (g_uiScale != 1.0) {
+      CallAfter(&TPMixer::RescaleUI, g_uiScale);
+    }
   }
 }
 
 void TPMixer::pushGuiStateToDevice() {
-  if (NULL == hid->getHandle())
-    return;
+  if (NULL == hid->getHandle()) return;
 
-  // 1. Push Inputs (MON, 48V, INST, and Gain/Mute/Solo/Phase)
-  for (int i = 0; i < hid->numInputs; ++i) {
-    hid->setInputMon(i, panelInputs->cbMon[i]->GetValue());
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-
-    hid->setInput48V(i, panelInputs->cb48V[i]->GetValue());
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-
-    if (panelInputs->cbInst[i]) {
-      hid->setInputInst(i, panelInputs->cbInst[i]->GetValue());
-      std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  int activeCols = (hid->pid == 0x8754) ? 3 : ((hid->pid == 0x8752 || hid->pid == 0x8756) ? 2 : 1);
+  for (int col = 0; col < activeCols; ++col) {
+    if (col < 2) {
+      if (panelInputs->cbMon[col]) hid->setInputMon(col, panelInputs->cbMon[col]->GetValue());
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      if (panelInputs->cb48V[col]) hid->setInput48V(col, panelInputs->cb48V[col]->GetValue());
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      if (panelInputs->cbInst[col]) hid->setInputInst(col, panelInputs->cbInst[col]->GetValue());
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-
-    // Pushes Gain, Mute, Solo, Phase
-    sendInput(i, true);
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    sendInput(col, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  // 2. Push Output configuration
-  for (int i = 0; i < 2; ++i) {
+  int numOuts = (hid->pid == 0x8752) ? 1 : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
+  for (int i = 0; i < numOuts; ++i) {
     int val = panelOutputs->cbSelect[i]->GetSelection();
     hid->setOutputSel(i, val + 1);
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-  }
-
-  // Output Mon and Line
-  for (int i = 0; i < 2; ++i) {
-    hid->setOutputMon(i, panelOutputs->ckOutputMon[i]->GetValue());
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-
-    hid->setOutputLine(i, panelOutputs->ckOutputLine[i]->GetValue());
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-  }
-
-  // 3. Push Phones mix & Phones gain
-  for (int i = 0; i < 2; ++i) {
-    int valGain = panelPhones->ckPhoneGain[i]->GetValue() ? 1 : 0;
-    hid->setPhoneGainBoost(i, valGain);
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-
-    int valMix = panelPhones->slPhoneMix[i]->GetValue();
-    int devMix = (valMix / 2) + 50; // map back to 0..100
-    hid->setPhoneMix(i, devMix);
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-  }
-
-  // 4. Push Output levels
-  for (int i = 0; i < panelOutputs->N_OUTPUTS; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    
     setOutputVol(i);
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  // 5. Push Loopback source selection and levels
   for (int i = 0; i < panelLoopbacks->N_LOOPBACKS; ++i) {
-    int valSel = panelLoopbacks->cbSelect[i]->GetSelection();
-    hid->setLoopSel(i, valSel + 1);
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-
-    setLoopVol(i);
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-  }
-
-  // 6. Push Mixers
-  int bus = panelMixers->rboxMixerSelBox->GetSelection();
-  for (int ch = 0; ch < panelMixers->N_MIX_SRCS; ++ch) {
-    int pan = panelMixers->slPan[ch]->GetValue();
-    bool mute = panelMixers->ckMute[ch]->GetValue();
-    bool solo = panelMixers->ckSolo[ch]->GetValue();
-    bool phase = panelMixers->ckPhase[ch]->GetValue();
-    int gainDB = panelMixers->slVol[ch]->GetValue();
-
-    bool anySolo = false;
-    for (int i = 0; i < panelMixers->N_MIX_SRCS; ++i) {
-      if (panelMixers->ckSolo[i]->GetValue())
-        anySolo = true;
+    if (panelLoopbacks->cbSelect[i]) {
+      int val = panelLoopbacks->cbSelect[i]->GetSelection();
+      hid->setLoopSel(i, val + 1);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      setLoopVol(i);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-
-    auto [gainL, gainR] =
-        gain->getStereoGain(gainDB, mute, solo, anySolo, phase, pan);
-    hid->setMixVol(bus, ch, gainL, gainR);
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-  }
-
-  // 7. Push Device Settings
-  int valStandby = panelDevice->cbAutoStandby->GetValue() ? 1 : 0;
-  if (hid->pid == 0x8754) {
-    hid->setDeviceSetting(0x39, 0x01, valStandby);
-  } else {
-    hid->setDeviceSetting(0x11, 0x01, valStandby);
-  }
-  std::this_thread::sleep_for(std::chrono::milliseconds(15));
-
-  if (panelDevice->cbOTGMode) {
-    int valOTG = panelDevice->cbOTGMode->GetValue() ? 1 : 0;
-    if (hid->pid == 0x8754) {
-      hid->setDeviceSetting(0x3a, 0x01, valOTG);
-    } else {
-      hid->setDeviceSetting(0x11, 0x03, valOTG);
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-  }
-
-  int valBright = panelDevice->choiceBrightness->GetSelection();
-  if (valBright != wxNOT_FOUND) {
-    hid->setDeviceSetting(0x10, 0x0a, valBright);
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
   }
 }
 
 void TPMixer::refreshMixerUi(int16_t bus) {
-  if (bus < 0) {
-    bus = panelMixers->rboxMixerSelBox->GetSelection();
-  }
-  for (int16_t i = 0; i < panelMixers->N_MIX_SRCS; i++) {
-    int32_t nGains = 0;
-    int32_t gains[2] = {0};
-    for (int16_t j = 0; j < 2; j++) {
-      int16_t key = 0x6101 + ((j + bus * 2) << 8) + i;
-      if (hid->settings.contains(key)) {
-        nGains++;
-        gains[j] = hid->settings[key];
+  if (bus < 0) bus = 0;
+  for (int16_t stripIdx = 0; stripIdx < panelMixers->N_MIX_SRCS / 2; stripIdx++) {
+    int l = stripIdx * 2;
+    int r = l + 1;
+    
+    // Left source keys
+    uint16_t keyL_L = ((0x61 + bus * 2) << 8) | (l + 1);
+    uint16_t keyL_R = ((0x62 + bus * 2) << 8) | (l + 1);
+    
+    // Right source keys
+    uint16_t keyR_L = ((0x61 + bus * 2) << 8) | (r + 1);
+    uint16_t keyR_R = ((0x62 + bus * 2) << 8) | (r + 1);
+
+    if (hid->settings.contains(keyL_L) && hid->settings.contains(keyL_R) &&
+        hid->settings.contains(keyR_L) && hid->settings.contains(keyR_R)) {
+        
+      auto [mutedL, phaseL, panL, gainDBL] = lrGain2PandB(hid->settings[keyL_L], hid->settings[keyL_R], panelMixers->minGain);
+      auto [mutedR, phaseR, panR, gainDBR] = lrGain2PandB(hid->settings[keyR_L], hid->settings[keyR_R], panelMixers->minGain);
+
+      if (panelMixers->slPan[l]) panelMixers->slPan[l]->SetValue(panL);
+      if (panelMixers->slPan[r]) panelMixers->slPan[r]->SetValue(panR);
+
+      bool linked = (gainDBL == gainDBR) && (mutedL == mutedR) && (phaseL == phaseR);
+      if (panelMixers->btnLink[stripIdx]) panelMixers->btnLink[stripIdx]->SetValue(linked);
+
+      if (linked) {
+        if (panelMixers->slVol[stripIdx]) panelMixers->slVol[stripIdx]->SetValue(gainDBL);
+        if (panelMixers->ckSolo[stripIdx]) panelMixers->ckSolo[stripIdx]->SetValue(false);
+        if (panelMixers->ckMute[stripIdx]) panelMixers->ckMute[stripIdx]->SetValue(mutedL);
+        if (panelMixers->ckPhaseCombined[stripIdx]) panelMixers->ckPhaseCombined[stripIdx]->SetValue(phaseL);
+      } else {
+        if (panelMixers->slVolL[stripIdx]) panelMixers->slVolL[stripIdx]->SetValue(gainDBL);
+        if (panelMixers->slVolR[stripIdx]) panelMixers->slVolR[stripIdx]->SetValue(gainDBR);
+
+        if (panelMixers->ckSoloL[stripIdx]) panelMixers->ckSoloL[stripIdx]->SetValue(false);
+        if (panelMixers->ckSoloR[stripIdx]) panelMixers->ckSoloR[stripIdx]->SetValue(false);
+        if (panelMixers->ckMuteL[stripIdx]) panelMixers->ckMuteL[stripIdx]->SetValue(mutedL);
+        if (panelMixers->ckMuteR[stripIdx]) panelMixers->ckMuteR[stripIdx]->SetValue(mutedR);
+
+        if (panelMixers->ckPhase[l]) panelMixers->ckPhase[l]->SetValue(phaseL);
+        if (panelMixers->ckPhase[r]) panelMixers->ckPhase[r]->SetValue(phaseR);
+      }
+
+      if (panelMixers->slVol[stripIdx]) panelMixers->slVol[stripIdx]->Show(linked);
+      if (panelMixers->slVolL[stripIdx]) panelMixers->slVolL[stripIdx]->Show(!linked);
+      if (panelMixers->slVolR[stripIdx]) panelMixers->slVolR[stripIdx]->Show(!linked);
+
+      if (panelMixers->combBtnSizer[stripIdx]) panelMixers->combBtnSizer[stripIdx]->Show(linked);
+      if (panelMixers->splitBtnSizer[stripIdx]) panelMixers->splitBtnSizer[stripIdx]->Show(!linked);
+
+      if (panelMixers->lbVolVal[stripIdx]) {
+        if (linked) {
+          panelMixers->lbVolVal[stripIdx]->SetLabel(mutedL ? "-inf  -inf" : std::format("{:.0f}  {:.0f}", (double)gainDBL, (double)gainDBL));
+        } else {
+          wxString lblL = mutedL ? "-inf" : std::format("{:.0f}", (double)gainDBL);
+          wxString lblR = mutedR ? "-inf" : std::format("{:.0f}", (double)gainDBR);
+          panelMixers->lbVolVal[stripIdx]->SetLabel(lblL + "  " + lblR);
+        }
       }
     }
-    if (2 == nGains) {
-      auto [muted, phase, pan, gainDB] =
-          lrGain2PandB(gains[0], gains[1], panelMixers->minGain);
-      panelMixers->slPan[i]->SetValue(pan);
-      panelMixers->slVol[i]->SetValue(gainDB);
-      panelMixers->ckMute[i]->SetValue(muted);
-      panelMixers->ckPhase[i]->SetValue(phase);
-      // printf("line %d: src %1x, %08x %08x, pan %4d, gain %4d\n", __LINE__, i,
-      // gains[0], gains[1], pan, gainDB);
-    }
   }
-  for (int16_t i = 0; i < panelMixers->N_MIX_SRCS / 2; i++) {
-    int16_t a = i * 2;
-    int16_t b = a + 1;
-
-    int32_t gainA = panelMixers->slVol[a]->GetValue();
-    int32_t gainB = panelMixers->slVol[b]->GetValue();
-    if (gainA > gainB) {
-      panelMixers->slVolB[i]->SetValue(gainA);
-    } else {
-      panelMixers->slVolB[i]->SetValue(gainB);
-    }
-  }
+  panelMixers->Layout();
 }
 
 void TPMixer::refreshLoopbackUi() {
   for (int16_t i = 0; i < panelLoopbacks->N_LOOPBACKS; i++) {
-    int32_t gainL = panelLoopbacks->slOutputL[i]->GetValue();
-    int32_t gainR = panelLoopbacks->slOutputR[i]->GetValue();
-    int32_t max = 0;
-    if (gainL > gainR) {
-      max = gainL;
+    if (!panelLoopbacks->btnLink[i]) continue;
+    int32_t valL = hid->settings[0x5103 + ((i * 2) << 8)];
+    int32_t valR_real = hid->settings[0x5103 + ((i * 2 + 1) << 8)];
+    
+    auto [mutedL, dummyL, gainDBL] = gain2dB(valL);
+    auto [mutedR, dummyR, gainDBR] = gain2dB(valR_real);
+    bool linked = (gainDBL == gainDBR);
+
+    if (panelLoopbacks->btnLink[i]) panelLoopbacks->btnLink[i]->SetValue(linked);
+    
+    if (linked) {
+      if (panelLoopbacks->slOutput[i]) panelLoopbacks->slOutput[i]->SetValue(gainDBL);
+      if (panelLoopbacks->ckMute[i]) panelLoopbacks->ckMute[i]->SetValue(mutedL);
     } else {
-      max = gainR;
+      if (panelLoopbacks->slOutputL[i]) panelLoopbacks->slOutputL[i]->SetValue(gainDBL);
+      if (panelLoopbacks->slOutputR[i]) panelLoopbacks->slOutputR[i]->SetValue(gainDBR);
+      if (panelLoopbacks->ckMuteL[i]) panelLoopbacks->ckMuteL[i]->SetValue(mutedL);
+      if (panelLoopbacks->ckMuteR[i]) panelLoopbacks->ckMuteR[i]->SetValue(mutedR);
     }
-    panelLoopbacks->slOutputB[i]->SetValue(max);
-    printf("line %d: checking [%d], %4d, %4d, set to %d\n", __LINE__, i, gainL,
-           gainR, panelLoopbacks->slOutputB[i]->GetValue());
+    
+    if (panelLoopbacks->slOutput[i]) panelLoopbacks->slOutput[i]->Show(linked);
+    if (panelLoopbacks->slOutputL[i]) panelLoopbacks->slOutputL[i]->Show(!linked);
+    if (panelLoopbacks->slOutputR[i]) panelLoopbacks->slOutputR[i]->Show(!linked);
+    
+    if (panelLoopbacks->combBtnSizer[i]) panelLoopbacks->combBtnSizer[i]->Show(linked);
+    if (panelLoopbacks->splitBtnSizer[i]) panelLoopbacks->splitBtnSizer[i]->Show(!linked);
+    
+    if (panelLoopbacks->lbLoopVolVal[i]) {
+      if (mutedL && mutedR) {
+        panelLoopbacks->lbLoopVolVal[i]->SetLabel("-inf  -inf");
+      } else {
+        wxString lblL = mutedL ? "-inf" : std::format("{:.0f}", (double)gainDBL);
+        wxString lblR = mutedR ? "-inf" : std::format("{:.0f}", (double)gainDBR);
+        panelLoopbacks->lbLoopVolVal[i]->SetLabel(lblL + "  " + lblR);
+      }
+    }
   }
+  panelLoopbacks->Layout();
 }
 
 void TPMixer::refreshOutputUi() {
-  for (int16_t i = 0; i < panelOutputs->N_OUTPUTS; i++) {
-    int32_t gainL = panelLoopbacks->slOutputL[i]->GetValue();
-    int32_t gainR = panelLoopbacks->slOutputR[i]->GetValue();
-    if (gainL > gainR) {
-      panelLoopbacks->slOutputB[i]->SetValue(gainL);
+  int numOuts = (hid->pid == 0x8752) ? 1 : ((hid->pid == 0x8755 || hid->pid == 0x8756) ? 2 : 3);
+  for (int16_t i = 0; i < numOuts; i++) {
+    int32_t valL = hid->settings[0x3103 + ((i * 2) << 8)];
+    int32_t valR = hid->settings[0x3103 + ((i * 2 + 1) << 8)];
+    
+    auto [mutedL, dummyL, gainDBL] = gain2dB(valL);
+    auto [mutedR, dummyR, gainDBR] = gain2dB(valR);
+    bool linked = (gainDBL == gainDBR);
+
+    if (panelOutputs->btnLink[i]) panelOutputs->btnLink[i]->SetValue(linked);
+    
+    if (linked) {
+      if (panelOutputs->slOutput[i]) panelOutputs->slOutput[i]->SetValue(gainDBL);
+      if (i > 0 && panelOutputs->ckMute[i]) panelOutputs->ckMute[i]->SetValue(mutedL);
     } else {
-      panelLoopbacks->slOutputB[i]->SetValue(gainR);
+      if (panelOutputs->slOutputL[i]) panelOutputs->slOutputL[i]->SetValue(gainDBL);
+      if (panelOutputs->slOutputR[i]) panelOutputs->slOutputR[i]->SetValue(gainDBR);
+      if (i > 0) {
+        if (panelOutputs->ckMuteL[i]) panelOutputs->ckMuteL[i]->SetValue(mutedL);
+        if (panelOutputs->ckMuteR[i]) panelOutputs->ckMuteR[i]->SetValue(mutedR);
+      }
+    }
+    
+    if (panelOutputs->slOutput[i]) panelOutputs->slOutput[i]->Show(linked);
+    if (panelOutputs->slOutputL[i]) panelOutputs->slOutputL[i]->Show(!linked);
+    if (panelOutputs->slOutputR[i]) panelOutputs->slOutputR[i]->Show(!linked);
+    
+    if (i > 0) {
+      if (panelOutputs->combBtnSizer[i]) panelOutputs->combBtnSizer[i]->Show(linked);
+      if (panelOutputs->splitBtnSizer[i]) panelOutputs->splitBtnSizer[i]->Show(!linked);
+    }
+    
+    if (panelOutputs->lbOutVolVal[i]) {
+      if (mutedL && mutedR) {
+        panelOutputs->lbOutVolVal[i]->SetLabel("-inf  -inf");
+      } else {
+        wxString lblL = mutedL ? "-inf" : std::format("{:.0f}", (double)gainDBL);
+        wxString lblR = mutedR ? "-inf" : std::format("{:.0f}", (double)gainDBR);
+        panelOutputs->lbOutVolVal[i]->SetLabel(lblL + "  " + lblR);
+      }
     }
   }
+  panelOutputs->Layout();
 }
 
-//=========== Input handlers ==========
 void TPMixer::OnInputGain(wxCommandEvent &event) {
-  // int32_t val = event.GetInt();
-  int32_t evtId = event.GetId();
-  int32_t ch = evtId & 0x0f;
-  assert(ch < panelInputs->N_INPUTS);
-  // printf("%s(): event %04x, Input [%2d]\n", __func__, id, ch);
-  switch (evtId & (~0xf)) {
+  int32_t id = event.GetId();
+  int32_t ch = id & 0x0f;
+  
+  int colMap = (ch >= 2) ? 2 : ch;
+  bool inputLinked = (panelInputs->btnLink) ? panelInputs->btnLink->GetValue() : true;
+  
+  if (panelInputs->lbGainVal[colMap]) {
+    int32_t gainDB = 0;
+    if (colMap < 2) {
+      if (panelInputs->slGainI[colMap]) gainDB = panelInputs->slGainI[colMap]->GetValue();
+      panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} dB", gainDB));
+    } else {
+      if (inputLinked) {
+        if (panelInputs->slGainICombined) gainDB = panelInputs->slGainICombined->GetValue();
+        panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} dB", gainDB));
+      } else {
+        int32_t gainDBL = panelInputs->slGainI[2] ? panelInputs->slGainI[2]->GetValue() : 0;
+        int32_t gainDBR = panelInputs->slGainI[3] ? panelInputs->slGainI[3]->GetValue() : 0;
+        panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} / {:+}", gainDBL, gainDBR));
+      }
+    }
+  }
+
+  switch (id & (~0xf)) {
   case ID_INPUT_GAIN:
   case ID_INPUT_SOLO:
   case ID_INPUT_MUTE:
   case ID_INPUT_PHASE:
-    sendInput(ch, true, evtId);
+    sendInput(ch, true, id);
     break;
   case ID_INPUT_48V:
-    hid->setInput48V(ch, panelInputs->cb48V[ch]->GetValue());
-    hid->settings[0x2102 + (ch << 8)] =
-        panelInputs->cb48V[ch]->GetValue() ? 1 : 0;
+    if (panelInputs->cb48V[ch]) hid->setInput48V(ch, panelInputs->cb48V[ch]->GetValue());
     break;
   case ID_INPUT_MON:
-    hid->setInputMon(ch, panelInputs->cbMon[ch]->GetValue());
-    hid->settings[0x2101 + (ch << 8)] =
-        panelInputs->cbMon[ch]->GetValue() ? 1 : 0;
+    if (panelInputs->cbMon[ch]) hid->setInputMon(ch, panelInputs->cbMon[ch]->GetValue());
     break;
   case ID_INPUT_INST:
-    hid->setInputInst(ch, panelInputs->cbInst[ch]->GetValue());
-    hid->settings[0x2103 + (ch << 8)] =
-        panelInputs->cbInst[ch]->GetValue() ? 1 : 0;
-    break;
-  default:
+    if (panelInputs->cbInst[ch]) hid->setInputInst(ch, panelInputs->cbInst[ch]->GetValue());
     break;
   }
 }
 
-void TPMixer::OnInputPeak(wxCommandEvent &event) {
-  int32_t id = event.GetId();
-  uint32_t ch = id - ID_INPUT_PEAK;
-
-  panelInputs->lbPeaksI[ch]->SetLabel(
-      wxString(std::format("{:+.1f}", panelInputs->LEVEL_MIN * 0.1)));
-  panelInputs->PeaksI[ch] = panelInputs->LEVEL_MIN;
-}
-
-//=========== Mixer handlers ==========
 void TPMixer::OnMixBusSel(wxCommandEvent &event) {
-  int32_t id = event.GetId();
   int32_t val = event.GetInt();
-  printf("%s(): %04x, %2d\n", __func__, id, val);
   refreshMixerUi(val);
 }
 
 void TPMixer::OnMixVolume(wxCommandEvent &event) {
-  int32_t id = event.GetId();
-  int32_t ch = id & 0x0f;
-  int32_t val = event.GetInt();
-  int32_t bus = panelMixers->rboxMixerSelBox->GetSelection();
+  // Not used in direct binding but kept for signature safety
+}
 
-  int32_t srcs[2] = {ch, ch};
-
-  bool update[2] = {false, false};
-  assert(ch < panelMixers->N_MIX_SRCS);
-  printf("%s(): %04x, %5d, bus %2d\n", __func__, id, val, bus);
-  switch (id & (~0xf)) {
-  case ID_MIX_MUTE:
-  case ID_MIX_PHASE:
-  case ID_MIX_VOL:
-  case ID_MIX_PAN:
-    srcs[0] = ch;
-    srcs[1] = ch;
-    // printf("ch [%2d] to %+4d\n", ch, val);
-    update[0] = true;
-    break;
-  case ID_MIX_SOLO:
-    srcs[0] = ch * 2;
-    srcs[1] = srcs[0] + 1;
-    update[0] = true;
-    update[1] = true;
-    break;
-  case ID_MIX_VOL_B:
-    srcs[0] = ch * 2;
-    srcs[1] = srcs[0] + 1;
-    panelMixers->slVol[srcs[0]]->SetValue(val);
-    panelMixers->slVol[srcs[1]]->SetValue(val);
-    update[0] = true;
-    update[1] = true;
-    // printf("set left and right [%2d,%2d] to %+4d\n", srcs[0], srcs[1], val);
-    break;
-  default:
-    break;
-  }
-  if (update[0] || update[1]) {
-
-    int32_t gainL = 0, gainR = 0;
-    int32_t pan = 0;
-    bool mute = false, solo = false, anySolo = false, phase = false;
-    int gainDB = 0;
-    for (int32_t i = 0; !anySolo && (i < panelMixers->N_MIX_SRCS); i++) {
-      if (panelMixers->ckSolo[i]->GetValue()) {
-        anySolo = true;
-      }
-    }
-    for (int32_t i = 0; i < 2; i++) {
-      if (update[i]) {
-        pan = panelMixers->slPan[srcs[i]]->GetValue();
-        mute = panelMixers->ckMute[srcs[i]]->GetValue();
-        solo = panelMixers->ckSolo[srcs[i]]->GetValue();
-        phase = panelMixers->ckPhase[srcs[i]]->GetValue();
-        gainDB = panelMixers->slVol[srcs[i]]->GetValue();
-        std::tie(gainL, gainR) =
-            gain->getStereoGain(gainDB, mute, solo, anySolo, phase, pan);
-        hid->setMixVol(bus, srcs[i], gainL, gainR);
-        hid->settings[((0x61 + bus * 2) << 8) | (srcs[i] + 1)] = gainL;
-        hid->settings[((0x62 + bus * 2) << 8) | (srcs[i] + 1)] = gainR;
-      }
+void TPMixer::OnMixVolumeChanged(int stripIdx) {
+  int32_t bus = 0;
+  for (int t = 0; t < panelMixers->N_MIXERS; ++t) {
+    if (panelMixers->tabButtons[t] && panelMixers->tabButtons[t]->GetValue()) {
+      bus = t; break;
     }
   }
+
+  bool linked = panelMixers->btnLink[stripIdx] ? panelMixers->btnLink[stripIdx]->GetValue() : true;
+  
+  int32_t panL = panelMixers->slPan[stripIdx*2] ? panelMixers->slPan[stripIdx*2]->GetValue() : -100;
+  int32_t panR = panelMixers->slPan[stripIdx*2+1] ? panelMixers->slPan[stripIdx*2+1]->GetValue() : 100;
+  
+  bool anySolo = false;
+  for (int i = 0; i < panelMixers->N_MIX_SRCS/2; ++i) {
+    if (panelMixers->btnLink[i] && panelMixers->btnLink[i]->GetValue()) {
+      if (panelMixers->ckSolo[i] && panelMixers->ckSolo[i]->GetValue()) anySolo = true;
+    } else {
+      if (panelMixers->ckSoloL[i] && panelMixers->ckSoloL[i]->GetValue()) anySolo = true;
+      if (panelMixers->ckSoloR[i] && panelMixers->ckSoloR[i]->GetValue()) anySolo = true;
+    }
+  }
+
+  int32_t gainDBL = 0, gainDBR = 0;
+  bool muteL = false, muteR = false;
+  bool soloL = false, soloR = false;
+  bool phaseL = false, phaseR = false;
+
+  if (linked) {
+    int32_t gainDB = panelMixers->slVol[stripIdx] ? panelMixers->slVol[stripIdx]->GetValue() : 0;
+    bool mute = panelMixers->ckMute[stripIdx] ? panelMixers->ckMute[stripIdx]->GetValue() : false;
+    bool solo = panelMixers->ckSolo[stripIdx] ? panelMixers->ckSolo[stripIdx]->GetValue() : false;
+    bool phase = panelMixers->ckPhaseCombined[stripIdx] ? panelMixers->ckPhaseCombined[stripIdx]->GetValue() : false;
+
+    gainDBL = gainDBR = gainDB;
+    muteL = muteR = mute;
+    soloL = soloR = solo;
+    phaseL = phaseR = phase;
+
+    if (panelMixers->lbVolVal[stripIdx]) {
+      if (mute || gainDB <= -60) {
+        panelMixers->lbVolVal[stripIdx]->SetLabel("-inf  -inf");
+      } else {
+        panelMixers->lbVolVal[stripIdx]->SetLabel(std::format("{:.0f}  {:.0f}", (double)gainDB, (double)gainDB));
+      }
+    }
+  } else {
+    gainDBL = panelMixers->slVolL[stripIdx] ? panelMixers->slVolL[stripIdx]->GetValue() : 0;
+    gainDBR = panelMixers->slVolR[stripIdx] ? panelMixers->slVolR[stripIdx]->GetValue() : 0;
+    muteL = panelMixers->ckMuteL[stripIdx] ? panelMixers->ckMuteL[stripIdx]->GetValue() : false;
+    muteR = panelMixers->ckMuteR[stripIdx] ? panelMixers->ckMuteR[stripIdx]->GetValue() : false;
+    soloL = panelMixers->ckSoloL[stripIdx] ? panelMixers->ckSoloL[stripIdx]->GetValue() : false;
+    soloR = panelMixers->ckSoloR[stripIdx] ? panelMixers->ckSoloR[stripIdx]->GetValue() : false;
+    phaseL = panelMixers->ckPhase[stripIdx * 2] ? panelMixers->ckPhase[stripIdx * 2]->GetValue() : false;
+    phaseR = panelMixers->ckPhase[stripIdx * 2 + 1] ? panelMixers->ckPhase[stripIdx * 2 + 1]->GetValue() : false;
+
+    if (panelMixers->lbVolVal[stripIdx]) {
+      wxString lblL = (muteL || gainDBL <= -60) ? "-inf" : std::format("{:.0f}", (double)gainDBL);
+      wxString lblR = (muteR || gainDBR <= -60) ? "-inf" : std::format("{:.0f}", (double)gainDBR);
+      panelMixers->lbVolVal[stripIdx]->SetLabel(lblL + "  " + lblR);
+    }
+  }
+
+  auto [gL, gR_dummy] = gain->getStereoGain(gainDBL, muteL, soloL, anySolo, phaseL, panL); 
+  auto [gL_dummy, gR] = gain->getStereoGain(gainDBR, muteR, soloR, anySolo, phaseR, panR);
+  hid->setMixVol(bus, stripIdx, gL, gR);
 }
 
-void TPMixer::OnMixToggle(wxCommandEvent &event) {
-  int32_t id = event.GetId();
-  int32_t ch = id & 0x0f;
-  int32_t val = event.GetInt();
-  assert(ch < panelMixers->N_MIX_SRCS);
-
-  printf("%s(): %04x, %5d\n", __func__, id, val);
-  switch (id & (~0xf)) {
-  case ID_MIX_SOLO:
-  case ID_MIX_MUTE: {
-  } break;
-  case ID_MIX_PHASE: {
-    panelOutputs->slOutputL[ch]->SetValue(val);
-    panelOutputs->slOutputR[ch]->SetValue(val);
-  } break;
-  }
-}
-
-//=========== Loopback handlers ==========
-void TPMixer::OnLoopVolume(wxCommandEvent &event) {
-  int32_t id = event.GetId();
-  int32_t ch = id & 0x0f;
-  int32_t val = event.GetInt();
-  assert(ch < panelLoopbacks->N_LOOPBACKS * 2);
-  printf("%s(): %04x, %5d\n", __func__, id, val);
-  bool toSetVolume = false;
-
-  // printf("%s(): %04x, %5d\n", __func__, id, val);
-  switch (id & (~0xf)) {
-  case ID_LOOP_VOL_L:
-    toSetVolume = true;
-    break;
-  case ID_LOOP_VOL_R:
-    toSetVolume = true;
-    break;
-  case ID_LOOP_VOL_B:
-    panelLoopbacks->slOutputL[ch]->SetValue(val);
-    panelLoopbacks->slOutputR[ch]->SetValue(val);
-    toSetVolume = true;
-    break;
-  default:
-    break;
-  }
-  if (toSetVolume) {
-    setLoopVol(ch);
-  }
-}
-
-void TPMixer::OnLoopToggle(wxCommandEvent &event) {
-  int32_t id = event.GetId();
-  int32_t ch = id & 0x0f;
-  int32_t val = event.GetInt();
-  assert(ch < panelLoopbacks->N_LOOPBACKS * 2);
-
-  printf("%s(): %04x, %5d\n", __func__, id, val);
-  switch (id & (~0xf)) {
-  case ID_LOOP_SEL:
-    hid->setLoopSel(ch, val + 1);
-    break;
-  case ID_LOOP_MUTE:
-    setLoopVol(ch / 2);
-    break;
-  default:
-    break;
-  }
-}
-
-//=========== Output  handlers ==========
 void TPMixer::OnOutputVolume(wxCommandEvent &event) {
   int32_t id = event.GetId();
   int32_t ch = id & 0x0f;
-  int32_t val = event.GetInt();
-  assert(ch < panelOutputs->N_OUTPUTS);
-  printf("%s(): %04x, %5d\n", __func__, id, val);
-  bool toSetVolume = false;
-  switch (id & (~0xf)) {
-  case ID_OUTPUT_VOL_L:
-    toSetVolume = true;
-    break;
-  case ID_OUTPUT_VOL_R:
-    toSetVolume = true;
-    break;
-  case ID_OUTPUT_VOL_B:
-    panelOutputs->slOutputL[ch]->SetValue(val);
-    panelOutputs->slOutputR[ch]->SetValue(val);
-    toSetVolume = true;
-    break;
-  default:
-    break;
+  bool linked = panelOutputs->btnLink[ch] ? panelOutputs->btnLink[ch]->GetValue() : true;
+  
+  if (panelOutputs->lbOutVolVal[ch]) {
+    if (linked) {
+      int32_t val = panelOutputs->slOutput[ch] ? panelOutputs->slOutput[ch]->GetValue() : 0;
+      if (val <= -60) {
+        panelOutputs->lbOutVolVal[ch]->SetLabel("-inf  -inf");
+      } else {
+        panelOutputs->lbOutVolVal[ch]->SetLabel(std::format("{:.0f}  {:.0f}", (double)val, (double)val));
+      }
+    } else {
+      int32_t valL = panelOutputs->slOutputL[ch] ? panelOutputs->slOutputL[ch]->GetValue() : 0;
+      int32_t valR = panelOutputs->slOutputR[ch] ? panelOutputs->slOutputR[ch]->GetValue() : 0;
+      wxString lblL = (valL <= -60) ? "-inf" : std::format("{:.0f}", (double)valL);
+      wxString lblR = (valR <= -60) ? "-inf" : std::format("{:.0f}", (double)valR);
+      panelOutputs->lbOutVolVal[ch]->SetLabel(lblL + "  " + lblR);
+    }
   }
-  // TODO phase
-  if (toSetVolume) {
-    setOutputVol(ch);
-  }
+  
+  setOutputVol(ch);
 }
 
 void TPMixer::OnOutputToggle(wxCommandEvent &event) {
   int32_t id = event.GetId();
   int32_t ch = id & 0x0f;
   int32_t val = event.GetInt();
-  assert(ch < panelOutputs->N_OUTPUTS);
-
-  // printf("%s(): %04x, %5d\n", __func__, id, val);
+  
   switch (id & (~0xf)) {
   case ID_OUTPUT_SEL:
     hid->setOutputSel(ch, val + 1);
     break;
   case ID_OUTPUT_MON:
-    hid->setOutputMon(ch, val);
+    if (ch == 0) {
+      hid->setOutputMon(ch, val);
+    } else {
+      setOutputVol(ch);
+    }
     break;
   case ID_OUTPUT_LINE:
     hid->setOutputLine(ch, val);
@@ -2809,30 +3678,63 @@ void TPMixer::OnOutputToggle(wxCommandEvent &event) {
   }
 }
 
-//=========== Phone handlers ==========
+void TPMixer::OnLoopVolume(wxCommandEvent &event) {
+  int32_t id = event.GetId();
+  int32_t ch = id & 0x0f;
+  bool linked = panelLoopbacks->btnLink[ch] ? panelLoopbacks->btnLink[ch]->GetValue() : true;
+  bool mute = panelLoopbacks->ckMute[ch] ? panelLoopbacks->ckMute[ch]->GetValue() : false;
+  
+  if (panelLoopbacks->lbLoopVolVal[ch]) {
+    if (linked) {
+      int32_t val = panelLoopbacks->slOutput[ch] ? panelLoopbacks->slOutput[ch]->GetValue() : 0;
+      if (mute || val <= -60) {
+        panelLoopbacks->lbLoopVolVal[ch]->SetLabel("-inf  -inf");
+      } else {
+        panelLoopbacks->lbLoopVolVal[ch]->SetLabel(std::format("{:.0f}  {:.0f}", (double)val, (double)val));
+      }
+    } else {
+      int32_t valL = panelLoopbacks->slOutputL[ch] ? panelLoopbacks->slOutputL[ch]->GetValue() : 0;
+      int32_t valR = panelLoopbacks->slOutputR[ch] ? panelLoopbacks->slOutputR[ch]->GetValue() : 0;
+      bool muteL = panelLoopbacks->ckMuteL[ch] ? panelLoopbacks->ckMuteL[ch]->GetValue() : false;
+      bool muteR = panelLoopbacks->ckMuteR[ch] ? panelLoopbacks->ckMuteR[ch]->GetValue() : false;
+      wxString lblL = (muteL || valL <= -60) ? "-inf" : std::format("{:.0f}", (double)valL);
+      wxString lblR = (muteR || valR <= -60) ? "-inf" : std::format("{:.0f}", (double)valR);
+      panelLoopbacks->lbLoopVolVal[ch]->SetLabel(lblL + "  " + lblR);
+    }
+  }
+
+  setLoopVol(ch);
+}
+
+void TPMixer::OnLoopToggle(wxCommandEvent &event) {
+  int32_t id = event.GetId();
+  int32_t ch = id & 0x0f;
+  int32_t val = event.GetInt();
+  
+  if ((id & (~0xf)) == ID_LOOP_SEL) {
+    hid->setLoopSel(ch, val + 1);
+  } else {
+    setLoopVol(ch);
+  }
+}
+
 void TPMixer::OnPhoneMix(wxCommandEvent &event) {
   int32_t val = event.GetInt();
-  int32_t id = event.GetId();
-  uint32_t ch = id - ID_PHONE_MIX;
-
-  SetStatusText(std::format("Phone mix[{}] to {}", ch, val));
-  hid->setPhoneMix(ch, val);
+  int idx = panelOutputs->choicePhoneOut->GetSelection();
+  if (idx == wxNOT_FOUND) return;
+  panelOutputs->m_phoneMix[idx] = val;
+  hid->setPhoneMix(idx, val);
 }
 
 void TPMixer::OnPhoneGain(wxCommandEvent &event) {
   int32_t val = event.GetInt();
-  int32_t id = event.GetId();
-  uint32_t ch = id - ID_PHONE_GAIN;
-
-  SetStatusText(std::format("Phone gain[{}] to {}", ch, val));
-  hid->setPhoneGainBoost(ch, val);
+  int idx = panelOutputs->choicePhoneOut->GetSelection();
+  if (idx == wxNOT_FOUND) return;
+  panelOutputs->m_phoneGain[idx] = val ? true : false;
+  hid->setPhoneGainBoost(idx, val);
 }
 
-void TPMixer::OnExit(wxCommandEvent &event) { Close(true); }
-
 void TPMixer::OnClose(wxCloseEvent &event) {
-  // printf("Stopping thread %p\n", thReader);
-
   toStopHidReader = true;
   if (thReader && thReader->joinable()) {
     thReader->join();
@@ -2841,15 +3743,11 @@ void TPMixer::OnClose(wxCloseEvent &event) {
   thReader = nullptr;
 
   saveSettings();
-
   delete hid;
   hid = nullptr;
-
   delete gain;
   gain = nullptr;
-
-  // printf("veto?\n");
-  // event.Veto();
+  
   event.Skip();
 }
 
@@ -2864,49 +3762,162 @@ void TPMixer::OnLoad(wxCommandEvent &event) {
   }
 }
 
-void TPMixer::OnSave(wxCommandEvent &event) { saveSettings(); }
-
-void TPMixer::OnDeviceSave(wxCommandEvent &event) { hid->saveDeviceDefault(); }
-
-void TPMixer::OnAbout(wxCommandEvent &event) {
-  wxMessageBox("This is Topping Mixer GUI Controller with wxWidgets",
-               "About tpmix", wxOK | wxICON_INFORMATION);
+void TPMixer::OnSave(wxCommandEvent &event) {
+  saveSettings();
 }
 
-void TPMixer::OnDeviceToggle(wxCommandEvent &event) {
-  if (NULL == hid->getHandle())
-    return;
+void TPMixer::OnDeviceSave(wxCommandEvent &event) {
+  hid->saveDeviceDefault();
+}
 
-  bool val = event.IsChecked();
-  int32_t val32 = val ? 1 : 0;
-
-  if (event.GetEventObject() == panelDevice->cbAutoStandby) {
-    if (hid->pid == 0x8754) {
-      hid->setDeviceSetting(0x39, 0x01, val32);
-      hid->settings[0x3901] = val32;
-    } else {
-      hid->setDeviceSetting(0x11, 0x01, val32);
-      hid->settings[0x1101] = val32;
-    }
-  } else if (panelDevice->cbOTGMode &&
-             event.GetEventObject() == panelDevice->cbOTGMode) {
-    if (hid->pid == 0x8754) {
-      hid->setDeviceSetting(0x3a, 0x01, val32);
-      hid->settings[0x3a01] = val32;
-    } else {
-      hid->setDeviceSetting(0x11, 0x03, val32);
-      hid->settings[0x1103] = val32;
+void TPMixer::OnInputPeak(wxCommandEvent &event) {
+  uint32_t id = event.GetId();
+  uint32_t ch = id - ID_INPUT_PEAK;
+  if (ch < panelInputs->N_INPUTS) {
+    panelInputs->PeaksI[ch] = panelInputs->LEVEL_MIN;
+    if (panelInputs->lbPeaksI[ch]) {
+      panelInputs->lbPeaksI[ch]->SetLabel("-120.0");
     }
   }
 }
 
-void TPMixer::OnDeviceChoice(wxCommandEvent &event) {
-  if (NULL == hid->getHandle())
-    return;
+void TPMixer::OnLinkToggle(wxCommandEvent &event) {
+  int32_t id = event.GetId();
+  int32_t cls = id & (~0xf);
+  int32_t ch = id & 0x0f;
 
-  int sel = panelDevice->choiceBrightness->GetSelection();
-  if (sel != wxNOT_FOUND) {
-    hid->setDeviceSetting(0x10, 0x0a, sel);
-    hid->settings[0x100a] = sel;
+  if (cls == ID_INPUT_LINK) {
+    bool linked = panelInputs->btnLink->GetValue();
+    if (linked) {
+      int32_t lVal = panelInputs->slGainI[2] ? panelInputs->slGainI[2]->GetValue() : 0;
+      if (panelInputs->slGainICombined) panelInputs->slGainICombined->SetValue(lVal);
+      if (panelInputs->cbMute[2] && panelInputs->cbMuteL) panelInputs->cbMute[2]->SetValue(panelInputs->cbMuteL->GetValue());
+      if (panelInputs->cbSolo[2] && panelInputs->cbSoloL) panelInputs->cbSolo[2]->SetValue(panelInputs->cbSoloL->GetValue());
+      if (panelInputs->cbPhase[2] && panelInputs->cbPhaseL) panelInputs->cbPhase[2]->SetValue(panelInputs->cbPhaseL->GetValue());
+    } else {
+      int32_t combVal = panelInputs->slGainICombined ? panelInputs->slGainICombined->GetValue() : 0;
+      bool combMute = panelInputs->cbMute[2] ? panelInputs->cbMute[2]->GetValue() : false;
+      bool combSolo = panelInputs->cbSolo[2] ? panelInputs->cbSolo[2]->GetValue() : false;
+      bool combPhase = panelInputs->cbPhase[2] ? panelInputs->cbPhase[2]->GetValue() : false;
+
+      if (panelInputs->slGainI[2]) panelInputs->slGainI[2]->SetValue(combVal);
+      if (panelInputs->slGainI[3]) panelInputs->slGainI[3]->SetValue(combVal);
+      if (panelInputs->cbMuteL) panelInputs->cbMuteL->SetValue(combMute);
+      if (panelInputs->cbMuteR) panelInputs->cbMuteR->SetValue(combMute);
+      if (panelInputs->cbSoloL) panelInputs->cbSoloL->SetValue(combSolo);
+      if (panelInputs->cbSoloR) panelInputs->cbSoloR->SetValue(combSolo);
+      if (panelInputs->cbPhaseL) panelInputs->cbPhaseL->SetValue(combPhase);
+      if (panelInputs->cbPhaseR) panelInputs->cbPhaseR->SetValue(combPhase);
+    }
+    if (panelInputs->slGainICombined) panelInputs->slGainICombined->Show(linked);
+    if (panelInputs->slGainI[2]) panelInputs->slGainI[2]->Show(!linked);
+    if (panelInputs->slGainI[3]) panelInputs->slGainI[3]->Show(!linked);
+    
+    if (panelInputs->combBtnSizer) panelInputs->combBtnSizer->Show(linked);
+    if (panelInputs->splitBtnSizer) panelInputs->splitBtnSizer->Show(!linked);
+
+    panelInputs->Layout();
+    sendInput(2, true);
+  }
+  else if (cls == ID_MIX_LINK) {
+    bool linked = panelMixers->btnLink[ch]->GetValue();
+    if (linked) {
+      int32_t lVal = panelMixers->slVolL[ch] ? panelMixers->slVolL[ch]->GetValue() : 0;
+      if (panelMixers->slVol[ch]) panelMixers->slVol[ch]->SetValue(lVal);
+      if (panelMixers->ckMute[ch] && panelMixers->ckMuteL[ch]) panelMixers->ckMute[ch]->SetValue(panelMixers->ckMuteL[ch]->GetValue());
+      if (panelMixers->ckSolo[ch] && panelMixers->ckSoloL[ch]) panelMixers->ckSolo[ch]->SetValue(panelMixers->ckSoloL[ch]->GetValue());
+      if (panelMixers->ckPhaseCombined[ch] && panelMixers->ckPhase[ch*2]) panelMixers->ckPhaseCombined[ch]->SetValue(panelMixers->ckPhase[ch*2]->GetValue());
+    } else {
+      int32_t combVal = panelMixers->slVol[ch] ? panelMixers->slVol[ch]->GetValue() : 0;
+      bool combMute = panelMixers->ckMute[ch] ? panelMixers->ckMute[ch]->GetValue() : false;
+      bool combSolo = panelMixers->ckSolo[ch] ? panelMixers->ckSolo[ch]->GetValue() : false;
+      bool combPhase = panelMixers->ckPhaseCombined[ch] ? panelMixers->ckPhaseCombined[ch]->GetValue() : false;
+
+      if (panelMixers->slVolL[ch]) panelMixers->slVolL[ch]->SetValue(combVal);
+      if (panelMixers->slVolR[ch]) panelMixers->slVolR[ch]->SetValue(combVal);
+      if (panelMixers->ckMuteL[ch]) panelMixers->ckMuteL[ch]->SetValue(combMute);
+      if (panelMixers->ckMuteR[ch]) panelMixers->ckMuteR[ch]->SetValue(combMute);
+      if (panelMixers->ckSoloL[ch]) panelMixers->ckSoloL[ch]->SetValue(combSolo);
+      if (panelMixers->ckSoloR[ch]) panelMixers->ckSoloR[ch]->SetValue(combSolo);
+      if (panelMixers->ckPhase[ch*2]) panelMixers->ckPhase[ch*2]->SetValue(combPhase);
+      if (panelMixers->ckPhase[ch*2+1]) panelMixers->ckPhase[ch*2+1]->SetValue(combPhase);
+    }
+    if (panelMixers->slVol[ch]) panelMixers->slVol[ch]->Show(linked);
+    if (panelMixers->slVolL[ch]) panelMixers->slVolL[ch]->Show(!linked);
+    if (panelMixers->slVolR[ch]) panelMixers->slVolR[ch]->Show(!linked);
+    
+    if (panelMixers->combBtnSizer[ch]) panelMixers->combBtnSizer[ch]->Show(linked);
+    if (panelMixers->splitBtnSizer[ch]) panelMixers->splitBtnSizer[ch]->Show(!linked);
+
+    panelMixers->Layout();
+    this->OnMixVolumeChanged(ch);
+  }
+  else if (cls == ID_LOOP_LINK) {
+    bool linked = panelLoopbacks->btnLink[ch]->GetValue();
+    if (linked) {
+      int32_t lVal = panelLoopbacks->slOutputL[ch] ? panelLoopbacks->slOutputL[ch]->GetValue() : 0;
+      if (panelLoopbacks->slOutput[ch]) panelLoopbacks->slOutput[ch]->SetValue(lVal);
+      if (panelLoopbacks->ckMute[ch] && panelLoopbacks->ckMuteL[ch]) panelLoopbacks->ckMute[ch]->SetValue(panelLoopbacks->ckMuteL[ch]->GetValue());
+    } else {
+      int32_t combVal = panelLoopbacks->slOutput[ch] ? panelLoopbacks->slOutput[ch]->GetValue() : 0;
+      bool combMute = panelLoopbacks->ckMute[ch] ? panelLoopbacks->ckMute[ch]->GetValue() : false;
+      if (panelLoopbacks->slOutputL[ch]) panelLoopbacks->slOutputL[ch]->SetValue(combVal);
+      if (panelLoopbacks->slOutputR[ch]) panelLoopbacks->slOutputR[ch]->SetValue(combVal);
+      if (panelLoopbacks->ckMuteL[ch]) panelLoopbacks->ckMuteL[ch]->SetValue(combMute);
+      if (panelLoopbacks->ckMuteR[ch]) panelLoopbacks->ckMuteR[ch]->SetValue(combMute);
+    }
+    if (panelLoopbacks->slOutput[ch]) panelLoopbacks->slOutput[ch]->Show(linked);
+    if (panelLoopbacks->slOutputL[ch]) panelLoopbacks->slOutputL[ch]->Show(!linked);
+    if (panelLoopbacks->slOutputR[ch]) panelLoopbacks->slOutputR[ch]->Show(!linked);
+    
+    if (panelLoopbacks->combBtnSizer[ch]) panelLoopbacks->combBtnSizer[ch]->Show(linked);
+    if (panelLoopbacks->splitBtnSizer[ch]) panelLoopbacks->splitBtnSizer[ch]->Show(!linked);
+
+    panelLoopbacks->Layout();
+    setLoopVol(ch);
+  }
+  else if (cls == ID_OUTPUT_LINK) {
+    bool linked = panelOutputs->btnLink[ch]->GetValue();
+    if (linked) {
+      int32_t lVal = panelOutputs->slOutputL[ch] ? panelOutputs->slOutputL[ch]->GetValue() : 0;
+      if (panelOutputs->slOutput[ch]) panelOutputs->slOutput[ch]->SetValue(lVal);
+      if (ch > 0 && panelOutputs->ckMute[ch] && panelOutputs->ckMuteL[ch]) panelOutputs->ckMute[ch]->SetValue(panelOutputs->ckMuteL[ch]->GetValue());
+    } else {
+      int32_t combVal = panelOutputs->slOutput[ch] ? panelOutputs->slOutput[ch]->GetValue() : 0;
+      bool combMute = (ch > 0 && panelOutputs->ckMute[ch]) ? panelOutputs->ckMute[ch]->GetValue() : false;
+      if (panelOutputs->slOutputL[ch]) panelOutputs->slOutputL[ch]->SetValue(combVal);
+      if (panelOutputs->slOutputR[ch]) panelOutputs->slOutputR[ch]->SetValue(combVal);
+      if (ch > 0) {
+        if (panelOutputs->ckMuteL[ch]) panelOutputs->ckMuteL[ch]->SetValue(combMute);
+        if (panelOutputs->ckMuteR[ch]) panelOutputs->ckMuteR[ch]->SetValue(combMute);
+      }
+    }
+    if (panelOutputs->slOutput[ch]) panelOutputs->slOutput[ch]->Show(linked);
+    if (panelOutputs->slOutputL[ch]) panelOutputs->slOutputL[ch]->Show(!linked);
+    if (panelOutputs->slOutputR[ch]) panelOutputs->slOutputR[ch]->Show(!linked);
+    
+    if (ch > 0) {
+      if (panelOutputs->combBtnSizer[ch]) panelOutputs->combBtnSizer[ch]->Show(linked);
+      if (panelOutputs->splitBtnSizer[ch]) panelOutputs->splitBtnSizer[ch]->Show(!linked);
+    }
+
+    panelOutputs->Layout();
+    setOutputVol(ch);
   }
 }
+
+class MyApp : public wxApp {
+public:
+  bool OnInit() override {
+    wxInitAllImageHandlers();
+    TPMixer *frame = new TPMixer();
+    frame->Show(true);
+    return true;
+  }
+  int OnExit() override {
+    hid_exit();
+    return wxApp::OnExit();
+  }
+};
+
+wxIMPLEMENT_APP(MyApp);
