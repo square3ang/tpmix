@@ -1588,7 +1588,7 @@ class DownloadDialog : public wxDialog {
 public:
   DownloadDialog(wxWindow *parent)
       : wxDialog(parent, wxID_ANY, "Download", wxDefaultPosition,
-                 wxSize(380, 180), wxDEFAULT_DIALOG_STYLE) {
+                 wxSize(380, 150), wxDEFAULT_DIALOG_STYLE) {
     SetBackgroundColour(wxColour(30, 30, 30));
     SetForegroundColour(wxColour(220, 220, 220));
 
@@ -1598,16 +1598,12 @@ public:
     rbOption1 = new wxRadioButton(
         this, wxID_ANY, "Save current workspace and download to device",
         wxDefaultPosition, wxDefaultSize, wxRB_GROUP);
-    rbOption2 = new wxRadioButton(this, wxID_ANY,
-                                  "Save as workspace and download to device");
     rbOption3 = new wxRadioButton(this, wxID_ANY, "Download to device only");
 
     rbOption1->SetForegroundColour(*wxWHITE);
-    rbOption2->SetForegroundColour(*wxWHITE);
     rbOption3->SetForegroundColour(*wxWHITE);
 
     mainSizer->Add(rbOption1, 0, wxALL, 6);
-    mainSizer->Add(rbOption2, 0, wxALL, 6);
     mainSizer->Add(rbOption3, 0, wxALL, 6);
 
     wxBoxSizer *btnSizer = new wxBoxSizer(wxHORIZONTAL);
@@ -1632,7 +1628,6 @@ public:
   }
 
   wxRadioButton *rbOption1;
-  wxRadioButton *rbOption2;
   wxRadioButton *rbOption3;
 };
 
@@ -4774,22 +4769,6 @@ void TPMixer::OnLoad(wxCommandEvent &event) {
       if (NULL != hid->getHandle()) {
         hid->saveDeviceDefault();
         downloadSuccess = true;
-      }
-    } else if (dlg.rbOption2->GetValue()) {
-      // Option 2: Save as workspace and download to device
-      wxFileDialog saveFileDialog(this, "Save Workspace As", "", "",
-                                  "Settings files (*.settings)|*.settings",
-                                  wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
-      if (saveFileDialog.ShowModal() == wxID_OK) {
-        fileCfg = saveFileDialog.GetPath().ToStdString();
-        saveSettings();
-        std::filesystem::path p(fileCfg);
-        valWork->SetLabel(p.stem().string() + "  ");
-        Layout();
-        if (NULL != hid->getHandle()) {
-          hid->saveDeviceDefault();
-          downloadSuccess = true;
-        }
       }
     } else if (dlg.rbOption3->GetValue()) {
       // Option 3: Download to device only
