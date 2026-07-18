@@ -360,7 +360,7 @@ public:
   };
   void saveDeviceDefault() {
     buf[5] = 0x11;
-    buf[6] = 0x06;
+    buf[6] = 0x05;
     write32BE(&buf[7], 1);
     enqueue(true, false);
   };
@@ -2666,6 +2666,7 @@ public:
   PanelMixers *panelMixers;
   PanelLoopbacks *panelLoopbacks;
   PanelOutputs *panelOutputs;
+  wxStaticText *valWork;
 
   TPMixer();
 
@@ -3018,7 +3019,7 @@ TPMixer::TPMixer()
   lblWork->SetForegroundColour(wxColour(140, 140, 140));
   headerSizer->Add(lblWork, 0, wxALIGN_CENTER_VERTICAL);
 
-  wxStaticText *valWork =
+  valWork =
       new wxStaticText(headerPanel, wxID_ANY, "New20260716  ");
   valWork->SetForegroundColour(*wxWHITE);
   headerSizer->Add(valWork, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
@@ -4762,18 +4763,54 @@ void TPMixer::OnClose(wxCloseEvent &event) {
 }
 
 void TPMixer::OnLoad(wxCommandEvent &event) {
-  if (loadSettings()) {
-    refreshInputsUi();
-    refreshMixerUi(-1);
-    refreshLoopbackUi();
-    refreshOutputUi();
-    if (NULL != hid->getHandle()) {
-      pushGuiStateToDevice();
+  DownloadDialog dlg(this);
+  ScaleUIElements(&dlg, g_uiScale);
+  dlg.Fit();
+  if (dlg.ShowModal() == wxID_OK) {
+    bool downloadSuccess = false;
+    if (dlg.rbOption1->GetValue()) {
+      // Option 1: Save current workspace and download to device
+      saveSettings();
+      if (NULL != hid->getHandle()) {
+        hid->saveDeviceDefault();
+        downloadSuccess = true;
+      }
+    } else if (dlg.rbOption2->GetValue()) {
+      // Option 2: Save as workspace and download to device
+      wxFileDialog saveFileDialog(this, "Save Workspace As", "", "",
+                                  "Settings files (*.settings)|*.settings",
+                                  wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+      if (saveFileDialog.ShowModal() == wxID_OK) {
+        fileCfg = saveFileDialog.GetPath().ToStdString();
+        saveSettings();
+        std::filesystem::path p(fileCfg);
+        valWork->SetLabel(p.stem().string() + "  ");
+        Layout();
+        if (NULL != hid->getHandle()) {
+          hid->saveDeviceDefault();
+          downloadSuccess = true;
+        }
+      }
+    } else if (dlg.rbOption3->GetValue()) {
+      // Option 3: Download to device only
+      if (NULL != hid->getHandle()) {
+        hid->saveDeviceDefault();
+        downloadSuccess = true;
+      }
+    }
+
+    if (downloadSuccess) {
+      wxMessageBox("Settings successfully downloaded to device!", "Download Success", wxOK | wxICON_INFORMATION, this);
+    } else if (NULL == hid->getHandle()) {
+      wxMessageBox("Failed to download to device: Device is not connected.", "Download Error", wxOK | wxICON_ERROR, this);
     }
   }
 }
 
-void TPMixer::OnSave(wxCommandEvent &event) { saveSettings(); }
+void TPMixer::OnSave(wxCommandEvent &event) {
+  saveSettings();
+  wxMessageBox("Workspace saved successfully!", "Save Success", wxOK | wxICON_INFORMATION, this);
+}
 
 void TPMixer::OnDeviceSave(wxCommandEvent &event) { hid->saveDeviceDefault(); }
 
