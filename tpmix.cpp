@@ -135,6 +135,14 @@ public:
   int32_t numInputs = 4;
   std::map<uint16_t, int32_t> settings;
   uint8_t phoneRegOffset() const { return 0x35; }
+  uint8_t getHidInputChannel(int16_t ch) const {
+    if (pid == 0x8756) {
+      if (ch == 0) return 0x21; // Analog IN 1
+      if (ch == 1) return 0x23; // Analog IN 2
+      if (ch == 2) return 0x22; // Mobile In
+    }
+    return 0x21 + ch;
+  }
   ToppingHID() {
     uint16_t pids[] = {0x8755, 0x8756, 0x8752, 0x8754};
     for (uint16_t p : pids) {
@@ -161,7 +169,8 @@ public:
   void initializeSettingsWithDefaults(bool force = false) {
     // 1. Inputs (ch 0..3)
     for (int i = 0; i < 4; ++i) {
-      uint16_t base = 0x2100 + (i << 8);
+      uint8_t hidCh = getHidInputChannel(i);
+      uint16_t base = (hidCh << 8);
       if (force || !settings.contains(base + 1))
         settings[base + 1] = 0; // MON
       if (force || !settings.contains(base + 2))
@@ -270,27 +279,27 @@ public:
   }
 
   void setInputGainiI32(int16_t ch, int32_t gain, bool exec = true) {
-    buf[5] = 0x21 + ch;
+    buf[5] = getHidInputChannel(ch);
     buf[6] = 0x05;
     write32BE(&buf[7], gain);
     enqueue(exec);
   };
   void setInput48V(int16_t ch, bool pOn, bool exec = true) {
-    buf[5] = 0x21 + ch;
+    buf[5] = getHidInputChannel(ch);
     buf[6] = 0x02;
     int32_t on32 = pOn ? 1 : 0;
     write32BE(&buf[7], on32);
     enqueue(exec);
   };
   void setInputMon(int16_t ch, bool MonOn, bool exec = true) {
-    buf[5] = 0x21 + ch;
+    buf[5] = getHidInputChannel(ch);
     buf[6] = 0x01;
     int32_t on32 = MonOn ? 1 : 0;
     write32BE(&buf[7], on32);
     enqueue(exec);
   };
   void setInputInst(int16_t ch, bool InstOn, bool exec = true) {
-    buf[5] = 0x21 + ch;
+    buf[5] = getHidInputChannel(ch);
     buf[6] = 0x03;
     int32_t on32 = InstOn ? 1 : 0;
     write32BE(&buf[7], on32);
@@ -2522,7 +2531,7 @@ public:
         btnRow->Add(btnPhoneIcon[0], 1, wxEXPAND | wxRIGHT, 1);
         btnRow->Add(btnTRS[0], 1, wxEXPAND | wxRIGHT, 1);
 
-        if (pid != 0x8755 && pid != 0x8752) {
+        if (pid == 0x8754 || pid == 0x8756) {
           btnAUX[0] = new CustomButton(stripPanel, ID_OUTPUT_LINE + 1, "AUX",
                                        true, wxSize(14, 16));
           btnAUX[0]->SetValue(true);
@@ -2904,17 +2913,20 @@ protected:
           gain->getMonoGain(loopGainDB, mute, solo, anySolo, phase);
       hid->setInputGainiI32(i, gainVal, hw);
 
-      hid->settings[0x2101 + (i << 8)] = mon ? 1 : 0;
+      uint8_t hidCh = hid->getHidInputChannel(i);
+      uint16_t keyBase = (hidCh << 8);
+
+      hid->settings[keyBase | 0x01] = mon ? 1 : 0;
       if (panelInputs->cbInst[colMap]) {
-        hid->settings[0x2103 + (i << 8)] =
+        hid->settings[keyBase | 0x03] =
             panelInputs->cbInst[colMap]->GetValue() ? 1 : 0;
       }
-      hid->settings[0x2105 + (i << 8)] = gainVal;
+      hid->settings[keyBase | 0x05] = gainVal;
 
-      hid->settings[0x2106 + (i << 8)] = mute ? 1 : 0;
-      hid->settings[0x2107 + (i << 8)] = solo ? 1 : 0;
-      hid->settings[0x2108 + (i << 8)] = phase ? 1 : 0;
-      hid->settings[0x2109 + (i << 8)] = loopGainDB;
+      hid->settings[keyBase | 0x06] = mute ? 1 : 0;
+      hid->settings[keyBase | 0x07] = solo ? 1 : 0;
+      hid->settings[keyBase | 0x08] = phase ? 1 : 0;
+      hid->settings[keyBase | 0x09] = loopGainDB;
     }
   }
 
@@ -3330,9 +3342,14 @@ TPMixer::TPMixer()
 
   Bind(wxEVT_CLOSE_WINDOW, &TPMixer::OnClose, this);
 
-  if (hid->pid == 0x8755 || hid->pid == 0x8756) {
+  if (hid->pid == 0x8755) {
     if (panelMixers->lbTitle[0])
       panelMixers->lbTitle[0]->SetLabel("IN 1");
+    if (panelMixers->lbTitle[1])
+      panelMixers->lbTitle[1]->SetLabel("Mobile In");
+  } else if (hid->pid == 0x8756) {
+    if (panelMixers->lbTitle[0])
+      panelMixers->lbTitle[0]->SetLabel("IN1+2");
     if (panelMixers->lbTitle[1])
       panelMixers->lbTitle[1]->SetLabel("Mobile In");
   } else if (hid->pid == 0x8752) {
@@ -3364,6 +3381,15 @@ TPMixer::TPMixer()
 // scbUpdateLevels callback routing
 // ----------------------------------------------------------------------------
 
+static int getLogicInputChannel(uint8_t hidCh, uint16_t pid) {
+  if (pid == 0x8756) {
+    if (hidCh == 0x21) return 0; // Analog IN 1
+    if (hidCh == 0x23) return 1; // Analog IN 2
+    if (hidCh == 0x22) return 2; // Mobile In
+  }
+  return hidCh - 0x21;
+}
+
 void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
   uint8_t ch = ch16 >> 8;
   uint8_t subCh = ch16 & 0xff;
@@ -3389,30 +3415,33 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
   case 0x10:
     break;
   case 0x20: {
-    int32_t logicCh = ch - 0x21;
+    int32_t logicCh = getLogicInputChannel(ch, hid->pid);
     int32_t vGauge = level01DB - panelInputs->LEVEL_MIN;
     int colMap = (logicCh >= 2) ? 2 : logicCh;
     bool inputLinked =
         (panelInputs->btnLink) ? panelInputs->btnLink->GetValue() : true;
+
+    uint8_t hidCh = hid->getHidInputChannel(logicCh);
+    uint16_t keyBase = (hidCh << 8);
 
     switch (subCh) {
     case 0x01:
       if (panelInputs->cbMon[colMap]) {
         panelInputs->cbMon[colMap]->SetValue(val);
       }
-      hid->settings[0x2101 + (logicCh << 8)] = val;
+      hid->settings[keyBase | 0x01] = val;
       break;
     case 0x02:
       if (panelInputs->cb48V[colMap]) {
         panelInputs->cb48V[colMap]->SetValue(val);
       }
-      hid->settings[0x2102 + (logicCh << 8)] = val;
+      hid->settings[keyBase | 0x02] = val;
       break;
     case 0x03:
       if (panelInputs->cbInst[colMap]) {
         panelInputs->cbInst[colMap]->SetValue(val);
       }
-      hid->settings[0x2103 + (logicCh << 8)] = val;
+      hid->settings[keyBase | 0x03] = val;
       break;
     case 0x04:
       if (vGauge < 0)
@@ -3494,45 +3523,44 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
         }
       }
       break;
-    case 0x05:
-      if (hid->pid == 0x8754) {
-        auto [muted, phase, gainDB] = gain2dB(val);
-        if (colMap < 2) {
-          if (panelInputs->slGainI[colMap])
-            panelInputs->slGainI[colMap]->SetValue(gainDB);
+    case 0x05: {
+      auto [muted, phase, gainDB] = gain2dB(val);
+      if (colMap < 2) {
+        if (panelInputs->slGainI[colMap])
+          panelInputs->slGainI[colMap]->SetValue(gainDB);
+      } else {
+        if (inputLinked) {
+          if (panelInputs->slGainICombined)
+            panelInputs->slGainICombined->SetValue(gainDB);
         } else {
-          if (inputLinked) {
-            if (panelInputs->slGainICombined)
-              panelInputs->slGainICombined->SetValue(gainDB);
-          } else {
-            if (panelInputs->slGainI[logicCh])
-              panelInputs->slGainI[logicCh]->SetValue(gainDB);
-          }
-        }
-        if (panelInputs->cbMute[colMap])
-          panelInputs->cbMute[colMap]->SetValue(muted);
-        if (panelInputs->cbPhase[colMap])
-          panelInputs->cbPhase[colMap]->SetValue(phase);
-        if (panelInputs->lbGainVal[colMap]) {
-          panelInputs->lbGainVal[colMap]->SetLabel(
-              std::format("{:+} dB", gainDB));
+          if (panelInputs->slGainI[logicCh])
+            panelInputs->slGainI[logicCh]->SetValue(gainDB);
         }
       }
+      if (panelInputs->cbMute[colMap])
+        panelInputs->cbMute[colMap]->SetValue(muted);
+      if (panelInputs->cbPhase[colMap])
+        panelInputs->cbPhase[colMap]->SetValue(phase);
+      if (panelInputs->lbGainVal[colMap]) {
+        panelInputs->lbGainVal[colMap]->SetLabel(
+            std::format("{:+} dB", gainDB));
+      }
       break;
+    }
     case 0x06:
       if (panelInputs->cbMute[colMap])
         panelInputs->cbMute[colMap]->SetValue(val ? true : false);
-      hid->settings[0x2106 + (logicCh << 8)] = val;
+      hid->settings[keyBase | 0x06] = val;
       break;
     case 0x07:
       if (panelInputs->cbSolo[colMap])
         panelInputs->cbSolo[colMap]->SetValue(val ? true : false);
-      hid->settings[0x2107 + (logicCh << 8)] = val;
+      hid->settings[keyBase | 0x07] = val;
       break;
     case 0x08:
       if (panelInputs->cbPhase[colMap])
         panelInputs->cbPhase[colMap]->SetValue(val ? true : false);
-      hid->settings[0x2108 + (logicCh << 8)] = val;
+      hid->settings[keyBase | 0x08] = val;
       break;
     case 0x09:
       if (colMap < 2) {
@@ -3550,7 +3578,7 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
       if (panelInputs->lbGainVal[colMap]) {
         panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} dB", val));
       }
-      hid->settings[0x2109 + (logicCh << 8)] = val;
+      hid->settings[keyBase | 0x09] = val;
       break;
     }
   } break;
@@ -3738,10 +3766,18 @@ void TPMixer::HidReader(hid_device *handle) {
       if (res < 0) {
         break;
       }
-      if (res > 0 && 0x22 == bufread[0]) {
-        ch = read16BE(&bufread[5]);
-        val = read32BE(&bufread[7]);
-        CallAfter(&TPMixer::scbUpdateLevels, ch, val);
+      if (res >= 11) {
+        int offset = -1;
+        if (bufread[0] == 0x22 && bufread[1] == 0x33 && bufread[2] == 0x20) {
+          offset = 0;
+        } else if (bufread[1] == 0x22 && bufread[2] == 0x33 && bufread[3] == 0x20) {
+          offset = 1;
+        }
+        if (offset >= 0) {
+          ch = read16BE(&bufread[offset + 5]);
+          val = read32BE(&bufread[offset + 7]);
+          CallAfter(&TPMixer::scbUpdateLevels, ch, val);
+        }
       }
     }
   } else {
@@ -3751,7 +3787,8 @@ void TPMixer::HidReader(hid_device *handle) {
       for (int i = 0; i < activeCols; ++i) {
         int valLeft =
             panelInputs->LEVEL_MIN + rand() % (panelInputs->LEVEL_RANGE);
-        CallAfter(&TPMixer::scbUpdateLevels, (uint16_t)(0x2104 + (i << 8)),
+        uint8_t hidCh = hid->getHidInputChannel(i);
+        CallAfter(&TPMixer::scbUpdateLevels, (uint16_t)((hidCh << 8) | 0x04),
                   valLeft);
       }
       for (int i = 0; i < 6; ++i) {
@@ -4009,8 +4046,8 @@ void TPMixer::pushGuiStateToDevice() {
     hid->setOutputLine(0, hid->settings[0x3703] != 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  if (hid->settings.contains(0x3704) && hid->pid != 0x8755 &&
-      hid->pid != 0x8752) {
+  if (hid->settings.contains(0x3704) &&
+      (hid->pid == 0x8754 || hid->pid == 0x8756)) {
     hid->setOutputLine(1, hid->settings[0x3704] != 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
@@ -4081,8 +4118,10 @@ void TPMixer::refreshInputsUi() {
   for (int col = 0; col < numCols; ++col) {
     int logicCh = col;
     int colMap = (logicCh >= 2) ? 2 : logicCh;
+    uint8_t hidCh = hid->getHidInputChannel(logicCh);
+    uint16_t keyBase = (hidCh << 8);
 
-    uint16_t keyMon = 0x2101 + (logicCh << 8);
+    uint16_t keyMon = keyBase | 0x01;
     if (hid->settings.contains(keyMon)) {
       int32_t val = hid->settings[keyMon];
       if (panelInputs->cbMon[colMap]) {
@@ -4090,7 +4129,7 @@ void TPMixer::refreshInputsUi() {
       }
     }
 
-    uint16_t key48V = 0x2102 + (logicCh << 8);
+    uint16_t key48V = keyBase | 0x02;
     if (hid->settings.contains(key48V)) {
       int32_t val = hid->settings[key48V];
       if (panelInputs->cb48V[colMap]) {
@@ -4098,7 +4137,7 @@ void TPMixer::refreshInputsUi() {
       }
     }
 
-    uint16_t keyInst = 0x2103 + (logicCh << 8);
+    uint16_t keyInst = keyBase | 0x03;
     if (hid->settings.contains(keyInst)) {
       int32_t val = hid->settings[keyInst];
       if (panelInputs->cbInst[colMap]) {
@@ -4106,7 +4145,7 @@ void TPMixer::refreshInputsUi() {
       }
     }
 
-    uint16_t keyMute = 0x2106 + (logicCh << 8);
+    uint16_t keyMute = keyBase | 0x06;
     if (hid->settings.contains(keyMute)) {
       int32_t val = hid->settings[keyMute];
       if (panelInputs->cbMute[colMap]) {
@@ -4114,7 +4153,7 @@ void TPMixer::refreshInputsUi() {
       }
     }
 
-    uint16_t keySolo = 0x2107 + (logicCh << 8);
+    uint16_t keySolo = keyBase | 0x07;
     if (hid->settings.contains(keySolo)) {
       int32_t val = hid->settings[keySolo];
       if (panelInputs->cbSolo[colMap]) {
@@ -4122,7 +4161,7 @@ void TPMixer::refreshInputsUi() {
       }
     }
 
-    uint16_t keyPhase = 0x2108 + (logicCh << 8);
+    uint16_t keyPhase = keyBase | 0x08;
     if (hid->settings.contains(keyPhase)) {
       int32_t val = hid->settings[keyPhase];
       if (panelInputs->cbPhase[colMap]) {
@@ -4130,29 +4169,34 @@ void TPMixer::refreshInputsUi() {
       }
     }
 
-    uint16_t keyGain = 0x2109 + (logicCh << 8);
+    uint16_t keyGain = keyBase | 0x09;
     if (!hid->settings.contains(keyGain)) {
-      keyGain = 0x2105 + (logicCh << 8);
+      keyGain = keyBase | 0x05;
     }
     if (hid->settings.contains(keyGain)) {
       int32_t val = hid->settings[keyGain];
+      int32_t gainDB = val;
+      if ((keyGain & 0xff) == 0x05) {
+        auto [muted, phase, gDB] = gain2dB(val);
+        gainDB = gDB;
+      }
       if (colMap < 2) {
         if (panelInputs->slGainI[colMap]) {
-          panelInputs->slGainI[colMap]->SetValue(val);
+          panelInputs->slGainI[colMap]->SetValue(gainDB);
         }
       } else {
         if (inputLinked) {
           if (panelInputs->slGainICombined) {
-            panelInputs->slGainICombined->SetValue(val);
+            panelInputs->slGainICombined->SetValue(gainDB);
           }
         } else {
           if (panelInputs->slGainI[logicCh]) {
-            panelInputs->slGainI[logicCh]->SetValue(val);
+            panelInputs->slGainI[logicCh]->SetValue(gainDB);
           }
         }
       }
       if (panelInputs->lbGainVal[colMap]) {
-        panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} dB", val));
+        panelInputs->lbGainVal[colMap]->SetLabel(std::format("{:+} dB", gainDB));
       }
     }
   }
