@@ -246,7 +246,9 @@ public:
     if (force || !settings.contains(0x3703))
       settings[0x3703] = 1; // TRS default: ON
     if (force || !settings.contains(0x3704))
-      settings[0x3704] = 1; // AUX default: ON
+      settings[0x3704] = 1; // AUX default: ON (E4x4)
+    if (force || !settings.contains(0x3705))
+      settings[0x3705] = 1; // AUX default: ON (E2x2 OTG)
 
     if (force || !settings.contains(0x3901))
       settings[0x3901] = 1; // Auto Standby default: ON
@@ -3401,9 +3403,9 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
     isLevelMeter = true;
   } else if (cls == 0x20 && subCh == 0x04) {
     isLevelMeter = true;
-  } else if (cls == 0x30 && (ch - 0x31) < 6 && subCh == 0x01) {
+  } else if (cls == 0x30 && (ch - 0x31) < 10 && (subCh == 0x01 || subCh == 0x02)) {
     isLevelMeter = true;
-  } else if (cls == 0x50 && subCh == 0x01) {
+  } else if (cls == 0x50 && (subCh == 0x01 || subCh == 0x02)) {
     isLevelMeter = true;
   }
 
@@ -3621,12 +3623,26 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
         hid->settings[ch16] = val;
       }
     } else if (logicCh == 0x06) {
-      if (subCh == 1 || subCh == 2) {
+      if (subCh == 1) {
         if (panelOutputs->btnPhoneIcon[0])
-          panelOutputs->btnPhoneIcon[0]->SetValue(val);
-      } else {
+          panelOutputs->btnPhoneIcon[0]->SetValue(val != 0);
+        hid->settings[0x3701] = val;
+      } else if (subCh == 2) {
+        if (panelOutputs->btnPhoneIcon[1])
+          panelOutputs->btnPhoneIcon[1]->SetValue(val != 0);
+        hid->settings[0x3702] = val;
+      } else if (subCh == 3) {
         if (panelOutputs->btnTRS[0])
-          panelOutputs->btnTRS[0]->SetValue(val);
+          panelOutputs->btnTRS[0]->SetValue(val != 0);
+        hid->settings[0x3703] = val;
+      } else if (subCh == 4) {
+        if (panelOutputs->btnAUX[0] && hid->pid == 0x8754)
+          panelOutputs->btnAUX[0]->SetValue(val != 0);
+        hid->settings[0x3704] = val;
+      } else if (subCh == 5) {
+        if (panelOutputs->btnAUX[0] && hid->pid == 0x8756)
+          panelOutputs->btnAUX[0]->SetValue(val != 0);
+        hid->settings[0x3705] = val;
       }
     } else {
       if (logicCh < 6 && subCh == 1) {
@@ -4033,12 +4049,12 @@ void TPMixer::pushGuiStateToDevice() {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
 
-  // 4. Push Phone/TRS/AUX enables (0x3701..0x3704)
+  // 4. Push Phone/TRS/AUX enables (0x3701..0x3705)
   if (hid->settings.contains(0x3701)) {
     hid->setOutputMon(0, hid->settings[0x3701] != 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  if (hid->settings.contains(0x3702)) {
+  if (hid->settings.contains(0x3702) && hid->pid == 0x8754) {
     hid->setOutputMon(1, hid->settings[0x3702] != 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
@@ -4046,9 +4062,12 @@ void TPMixer::pushGuiStateToDevice() {
     hid->setOutputLine(0, hid->settings[0x3703] != 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  if (hid->settings.contains(0x3704) &&
-      (hid->pid == 0x8754 || hid->pid == 0x8756)) {
+  if (hid->settings.contains(0x3704) && hid->pid == 0x8754) {
     hid->setOutputLine(1, hid->settings[0x3704] != 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  if (hid->settings.contains(0x3705) && hid->pid == 0x8756) {
+    hid->setDeviceSetting(0x37, 0x05, hid->settings[0x3705] != 0 ? 1 : 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
 
@@ -4462,8 +4481,9 @@ void TPMixer::refreshOutputUi() {
     panelOutputs->btnTRS[0]->SetValue(trsVal);
   }
   if (panelOutputs->btnAUX[0]) {
+    uint16_t regKey = (hid->pid == 0x8756) ? 0x3705 : 0x3704;
     bool auxVal =
-        hid->settings.contains(0x3704) ? (hid->settings[0x3704] != 0) : true;
+        hid->settings.contains(regKey) ? (hid->settings[regKey] != 0) : true;
     panelOutputs->btnAUX[0]->SetValue(auxVal);
   }
 
@@ -4693,13 +4713,28 @@ void TPMixer::OnOutputToggle(wxCommandEvent &event) {
     break;
   case ID_OUTPUT_MON:
     if (ch == 0) {
-      hid->setOutputMon(ch, val);
+      hid->setOutputMon(0, val);
+      hid->settings[0x3701] = val;
+    } else if (ch == 1) {
+      hid->setOutputMon(1, val);
+      hid->settings[0x3702] = val;
     } else {
       setOutputVol(ch);
     }
     break;
   case ID_OUTPUT_LINE:
-    hid->setOutputLine(ch, val);
+    if (ch == 0) {
+      hid->setOutputLine(0, val);
+      hid->settings[0x3703] = val;
+    } else if (ch == 1) {
+      if (hid->pid == 0x8756) {
+        hid->setDeviceSetting(0x37, 0x05, val);
+        hid->settings[0x3705] = val;
+      } else {
+        hid->setOutputLine(1, val);
+        hid->settings[0x3704] = val;
+      }
+    }
     break;
   }
 }
