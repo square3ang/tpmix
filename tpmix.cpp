@@ -504,14 +504,29 @@ enum IconType {
 
 static QString qs(const std::string &s) { return QString::fromStdString(s); }
 
-// Colors sampled from the official Control Center screenshots
-static const QColor COL_WINDOW(0, 0, 0), COL_HEADER(24, 24, 24),
-    COL_SECTION(31, 31, 31), COL_STRIP(22, 22, 22), COL_TITLEBOX(52, 52, 52),
-    COL_TITLE(185, 185, 185), COL_BTN(58, 58, 58), COL_BTN_TXT(175, 175, 175),
-    COL_METER_BG(46, 46, 46), COL_SCALE(150, 150, 150),
-    COL_TRACK(160, 160, 160), COL_HANDLE(216, 216, 218),
-    COL_GREEN(89, 155, 34), COL_RED(192, 57, 43), COL_YELLOW(212, 172, 13),
-    COL_BLUE(60, 92, 170), COL_ORANGE(211, 120, 0), COL_VAL(220, 220, 220);
+// Palette and geometry below are taken from the stylesheets and setupUi()
+// code of the official ToppingPro.exe (Control Center V1.13).
+static const QColor COL_WINDOW(0, 0, 0), COL_HEADER(31, 31, 31),
+    COL_SECTION(31, 31, 31), COL_STRIP(22, 22, 22), COL_TITLEBOX(46, 46, 46),
+    COL_TITLE(161, 161, 161), COL_BTN(60, 60, 60), COL_BTN_TXT(161, 161, 161),
+    COL_BTN_ON_TXT(214, 214, 214), COL_METER_BG(46, 46, 46),
+    COL_SCALE(161, 161, 161), COL_GROOVE(51, 51, 51), COL_TRACK(161, 161, 161),
+    COL_HANDLE(216, 216, 216), COL_TEXT(216, 216, 216),
+    COL_MON(39, 87, 215), COL_48V(234, 78, 78), COL_INST(234, 144, 71),
+    COL_SOLO(218, 169, 62), COL_MUTE(150, 39, 36), COL_PHASE(104, 188, 212),
+    COL_OUT_ON(66, 97, 192), COL_GAIN_ON(8, 150, 64),
+    COL_GREEN(8, 150, 64), COL_RED(234, 78, 78), COL_YELLOW(218, 169, 62),
+    COL_BLUE(66, 97, 192), COL_CLIP(246, 72, 71);
+
+// Original app font (Source Han Sans = Noto Sans CJK), bold
+static QFont uiFont(double px) {
+  QFont f;
+  f.setFamilies({"Source Han Sans CN", "Noto Sans CJK KR", "Noto Sans CJK SC",
+                 "Noto Sans"});
+  f.setWeight(QFont::Bold);
+  f.setPixelSize(std::max(1, (int)std::lround(px)));
+  return f;
+}
 
 static QVBoxLayout *vbox(QWidget *w = nullptr, int margin = 0, int spacing = 0) {
   auto *l = new QVBoxLayout(w);
@@ -558,22 +573,39 @@ static QLabel *mkLabel(QWidget *parent, const QString &text, double pt,
   return l;
 }
 
-// Rounded grey header box on top of every channel strip
-static QLabel *mkTitleBox(QWidget *parent, const QString &text) {
-  QLabel *l = mkLabel(parent, text, 9.5, true, COL_TITLE, Qt::AlignCenter);
-  l->setObjectName("titleBox");
+// Child at its original design rect; ScaleUIElements re-applies it * scale
+static void place(QWidget *w, int x, int y, int width, int height) {
+  QRect r(x, y, width, height);
+  w->setProperty("dr", r);
+  w->setFixedSize(width * g_uiScale, height * g_uiScale);
+  w->move(x * g_uiScale, y * g_uiScale);
+}
+
+// Text label in design pixels (scales exactly with the strip)
+static QLabel *mkPxLabel(QWidget *parent, const QString &text, double px,
+                         const QColor &col, Qt::Alignment align = Qt::AlignCenter) {
+  auto *l = new QLabel(text, parent);
+  l->setFont(uiFont(px * g_uiScale));
+  l->setProperty("basePx", px);
+  QPalette p = l->palette();
+  p.setColor(QPalette::WindowText, col);
+  l->setPalette(p);
+  l->setAlignment(align);
   return l;
 }
 
 // "Input |" section heading
 static QHBoxLayout *titleRow(QWidget *parent, const QString &title) {
-  auto *row = hbox(nullptr, 0, 12);
-  row->setContentsMargins(10, 6, 0, 4);
-  row->addWidget(mkLabel(parent, title, 11, true, QColor(200, 200, 200)));
+  auto *row = hbox(nullptr, 0, 10);
+  row->setContentsMargins(10, 4, 0, 4);
+  QLabel *l = mkPxLabel(parent, title, 14, COL_TITLE, Qt::AlignLeft | Qt::AlignVCenter);
+  l->setProperty("dsz", QSize(70, 22));
+  l->setFixedSize(70 * g_uiScale, 22 * g_uiScale);
+  row->addWidget(l);
   auto *bar = new QWidget(parent);
-  bar->setObjectName("titleBar");
-  setBg(bar, QColor(161, 161, 163));
-  bar->setFixedSize(3, 22);
+  setBg(bar, COL_TITLE);
+  bar->setProperty("dsz", QSize(3, 18));
+  bar->setFixedSize(3 * g_uiScale, 18 * g_uiScale);
   row->addWidget(bar, 0, Qt::AlignVCenter);
   return row;
 }
@@ -590,7 +622,7 @@ static QString dbText(int v, int minVal) {
 
 enum ButtonStyle {
   BTN_BOX,  // grey box, filled with the active color when on
-  BTN_TEXT, // bare text, white when on, dim when off (Link)
+  BTN_TEXT, // bare text, light when on, dark when off (Link, peak readout)
   BTN_TAB,  // colored text, outlined when selected (Mix A..D)
   BTN_ICON, // bare icon (header)
 };
@@ -625,11 +657,12 @@ public:
     update();
   }
 
+  // Mix tab: darker text color when not selected
+  void SetIdleColor(const QColor &c) { m_idleCol = c; }
+  void SetFontPx(double px) { m_fontPx = px; }
+
   void Rescale(double scale) {
-    int w = m_designSize.width() * scale, h = m_designSize.height() * scale;
-    setMinimumSize(w, h);
-    // narrow split buttons stretch to their column
-    setMaximumSize(m_designSize.width() <= 18 ? QWIDGETSIZE_MAX : w, h);
+    setFixedSize(m_designSize.width() * scale, m_designSize.height() * scale);
   }
 
 protected:
@@ -638,61 +671,56 @@ protected:
   void paintEvent(QPaintEvent *) override {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    p.scale(g_uiScale, g_uiScale);
-    double dx = width() / g_uiScale, dy = height() / g_uiScale;
+    double sx = (double)width() / m_designSize.width();
+    p.scale(sx, sx);
+    double dx = m_designSize.width(), dy = height() / sx;
     bool on = m_isToggle && m_isChecked;
+    QRectF r(0, 0, dx, dy);
 
     QColor bgCol = Qt::transparent;
     QColor fgCol = COL_BTN_TXT;
+    double fontPx = m_fontPx;
     if (m_style == BTN_BOX) {
       bgCol = on ? m_activeCol : COL_BTN;
-      if (!on && m_isHovered)
-        bgCol = COL_BTN.lighter(130);
+      fgCol = on ? COL_BTN_ON_TXT : COL_BTN_TXT;
       if (m_isPressed && !m_isToggle)
-        bgCol = COL_BTN.darker(130);
-      fgCol = on ? QColor(255, 255, 255) : COL_BTN_TXT;
+        bgCol = bgCol.darker(130);
+      if (fontPx <= 0)
+        fontPx = 10;
     } else if (m_style == BTN_TEXT) {
-      fgCol = !m_isToggle ? QColor(200, 200, 200)
-              : on        ? QColor(240, 240, 240)
-                          : QColor(80, 80, 80);
-      if (m_isHovered)
-        fgCol = fgCol.lighter(130);
+      fgCol = !m_isToggle ? COL_BTN_TXT : on ? COL_TEXT : QColor(60, 60, 60);
+      if (fontPx <= 0)
+        fontPx = 9;
     } else if (m_style == BTN_TAB) {
-      fgCol = m_activeCol;
-      if (on) {
-        p.setPen(QPen(QColor(126, 126, 126), 1.5));
-        p.setBrush(Qt::NoBrush);
-        p.drawRoundedRect(QRectF(1, 1, dx - 2, dy - 2), 3, 3);
-      } else if (m_isHovered) {
-        fgCol = fgCol.lighter(130);
-      }
+      fgCol = on || !m_idleCol.isValid() ? m_activeCol : m_idleCol;
+      if (fontPx <= 0)
+        fontPx = 12;
     } else {
-      fgCol = m_isHovered ? QColor(255, 255, 255) : QColor(225, 225, 225);
-      if (m_isPressed)
-        fgCol = QColor(150, 150, 150);
+      fgCol = m_isPressed ? QColor(150, 150, 150) : COL_TEXT;
     }
     if (!isEnabled()) {
-      fgCol = QColor(90, 90, 90);
+      fgCol = QColor(80, 80, 80);
       if (m_style == BTN_BOX)
         bgCol = QColor(40, 40, 40);
     }
     if (bgCol.alpha()) {
       p.setPen(Qt::NoPen);
       p.setBrush(bgCol);
-      p.drawRoundedRect(QRectF(0, 0, dx, dy), 2.5, 2.5);
+      p.drawRoundedRect(r, 2, 2);
+    }
+    // QSS "border: 2px solid gray" on hover; tabs keep it while selected
+    if ((m_isHovered && isEnabled()) || (m_style == BTN_TAB && on)) {
+      double bw = m_style == BTN_TEXT ? 1 : 2;
+      p.setPen(QPen(QColor(128, 128, 128), bw));
+      p.setBrush(Qt::NoBrush);
+      p.drawRoundedRect(r.adjusted(bw / 2, bw / 2, -bw / 2, -bw / 2), 3, 3);
     }
 
     double cx = dx / 2.0, cy = dy / 2.0;
     if (m_iconType == ICON_NONE) {
-      double fontScale = fontScaleFor(g_uiScale);
-      QFont f = font();
-      double pt = m_style == BTN_TAB ? 10.5 : (dy < 14.0 ? 7 : 8);
-      f.setPointSizeF(std::max(5.0, pt * fontScale));
-      f.setWeight(m_style == BTN_TEXT && !on && m_isToggle ? QFont::Normal
-                                                           : QFont::DemiBold);
-      p.setFont(f);
+      p.setFont(uiFont(fontPx));
       p.setPen(fgCol);
-      p.drawText(QRectF(0, 0, dx, dy), Qt::AlignCenter, m_label);
+      p.drawText(r, Qt::AlignCenter, m_label);
       return;
     }
 
@@ -802,11 +830,15 @@ private:
   bool m_isChecked = false;
   bool m_isPressed = false;
   bool m_isHovered = false;
-  QColor m_activeCol;
+  QColor m_activeCol, m_idleCol;
+  double m_fontPx = 0;
   IconType m_iconType;
   ButtonStyle m_style;
 };
 
+// Dial ported from the original "Balance" widget: drawn on a 200x200 canvas,
+// 41 ticks from 45 to 315 degrees, filled centre, triangle pointer.
+// Bipolar knobs light the ticks from the centre (pan), others from the minimum.
 class KnobControl : public QWidget {
 public:
   QSize m_designSize;
@@ -819,6 +851,7 @@ public:
         m_showValue(showValue) {
     if (m_designSize.width() <= 0 || m_designSize.height() <= 0)
       m_designSize = QSize(40, 50);
+    m_bipolar = minVal < 0 && maxVal > 0 && minVal == -maxVal;
     Rescale(g_uiScale);
   }
 
@@ -830,64 +863,80 @@ public:
     }
   }
   int GetValue() const { return m_val; }
+  void SetRingWidth(double w) { m_ringWidth = w; }
 
   void Rescale(double scale) {
     setFixedSize(m_designSize.width() * scale, m_designSize.height() * scale);
   }
 
 protected:
-  double angleOf(int v) const {
-    double pct = (double)(v - m_min) / (m_max - m_min);
-    return -135.0 + pct * 270.0; // degrees clockwise from 12 o'clock
-  }
-
   void paintEvent(QPaintEvent *) override {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    p.scale(g_uiScale, g_uiScale);
-    double dx = width() / g_uiScale, dy = height() / g_uiScale;
+    double sx = (double)width() / m_designSize.width();
+    double dx = m_designSize.width(), dy = height() / sx;
+    double textH = m_showValue ? 16 : 0;
+    double side = std::min(dx, dy - textH);
 
-    double textH = m_showValue ? 14 : 0;
-    double r = std::min(dx, dy - textH) / 2.0 - 3.5;
-    QPointF c(dx / 2.0, (dy - textH) / 2.0);
-    QColor ring = isEnabled() ? QColor(153, 153, 153) : QColor(80, 80, 80);
-    QColor white = isEnabled() ? QColor(250, 250, 250) : QColor(110, 110, 110);
-
-    p.setBrush(QColor(42, 42, 42));
-    p.setPen(QPen(ring, std::max(1.2, r * 0.07)));
-    p.drawEllipse(c, r, r);
-
-    // white arc from the zero/centre position to the current value
-    double a0 = angleOf(std::clamp(0, m_min, m_max)), a1 = angleOf(m_val);
-    if (std::abs(a1 - a0) > 0.5) {
-      double ra = r + 2.0;
-      QRectF arcRect(c.x() - ra, c.y() - ra, 2 * ra, 2 * ra);
-      p.setPen(QPen(white, std::max(1.4, r * 0.09), Qt::SolidLine, Qt::FlatCap));
-      p.setBrush(Qt::NoBrush);
-      // Qt: 0deg = 3 o'clock, positive = counter-clockwise
-      p.drawArc(arcRect, (int)((90 - a0) * 16), (int)(-(a1 - a0) * 16));
-    }
-
-    // pointer triangle near the rim
-    double a = angleOf(m_val) * M_PI / 180.0;
-    QPointF dir(sin(a), -cos(a)), perp(cos(a), sin(a));
-    double tipR = r * 0.78, baseR = r * 0.50, half = r * 0.17;
-    QPolygonF tri;
-    tri << c + dir * tipR << c + dir * baseR + perp * half
-        << c + dir * baseR - perp * half;
-    p.setPen(Qt::NoPen);
-    p.setBrush(white);
-    p.drawPolygon(tri);
+    bool en = isEnabled();
+    QColor border(151, 151, 151), fill(45, 45, 45), tickOff(22, 22, 22),
+        tickOn = en ? QColor(250, 250, 250) : QColor(110, 110, 110);
 
     if (m_showValue) {
-      QFont f = font();
-      f.setPointSizeF(8.5);
-      f.setWeight(QFont::DemiBold);
-      p.setFont(f);
-      p.setPen(isEnabled() ? QColor(200, 200, 200) : QColor(80, 80, 80));
+      p.save();
+      p.scale(sx, sx);
+      p.setFont(uiFont(11));
+      p.setPen(en ? COL_TITLE : QColor(80, 80, 80));
       QString valStr = m_val == 0 ? "+0" : qs(std::format("{:+}", m_val));
       p.drawText(QRectF(0, dy - textH, dx, textH), Qt::AlignCenter, valStr);
+      p.restore();
     }
+
+    p.translate(dx * sx / 2.0, (dy - textH) * sx / 2.0);
+    p.scale(side * sx / 200.0, side * sx / 200.0);
+
+    const int ticks = 40;
+    const double start = 45, span = 270;
+    double range = m_max - m_min;
+    double valDeg = span * (m_val - m_min) / range;
+    double midDeg = span / 2.0;
+    bool atMid = m_bipolar && m_val * 2 == m_max + m_min;
+
+    // 1. ticks
+    p.save();
+    p.rotate(start);
+    QPen tp;
+    tp.setWidthF(12);
+    tp.setCapStyle(Qt::FlatCap);
+    for (int i = 0; i <= ticks; ++i) {
+      double deg = span * i / ticks;
+      bool lit = m_bipolar ? (deg >= std::min(valDeg, midDeg) - 0.01 &&
+                              deg <= std::max(valDeg, midDeg) + 0.01)
+                           : deg <= valDeg + 0.01;
+      if (atMid)
+        lit = i == ticks / 2;
+      tp.setColor(lit ? tickOn : tickOff);
+      p.setPen(tp);
+      p.drawLine(QPointF(0, 85), QPointF(0, 95));
+      p.rotate(span / ticks);
+    }
+    p.restore();
+
+    // 2. centre disc
+    p.setPen(QPen(border, m_ringWidth));
+    p.setBrush(fill);
+    p.drawEllipse(QRectF(-75, -75, 150, 150));
+
+    // 3. pointer
+    p.save();
+    p.rotate(start + valDeg);
+    QColor pc = atMid ? border : tickOn;
+    p.setPen(pc);
+    p.setBrush(pc);
+    QPolygonF tri;
+    tri << QPointF(-12, 40) << QPointF(12, 40) << QPointF(0, 65);
+    p.drawConvexPolygon(tri);
+    p.restore();
   }
 
   void mousePressEvent(QMouseEvent *e) override {
@@ -935,13 +984,14 @@ private:
   QString m_title;
   int m_val, m_min, m_max, m_default;
   bool m_showValue;
+  bool m_bipolar;
+  double m_ringWidth = 8;
   bool m_isDragging = false;
   double m_dragStartY = 0;
   int m_dragStartVal = 0;
 };
 
-// Combo drawn like the original: bold text and a small triangle, optionally
-// on a grey box ("boxCombo")
+// Source selector (original QToolButton with a popup menu): plain light text
 class FlatCombo : public QComboBox {
 public:
   FlatCombo(QWidget *parent, const char *name) : QComboBox(parent) {
@@ -957,49 +1007,71 @@ protected:
     if (box) {
       p.setPen(Qt::NoPen);
       p.setBrush(COL_TITLEBOX);
-      p.drawRoundedRect(r, 4, 4);
+      p.drawRoundedRect(r, 5, 5);
     }
-    QColor fg = box ? QColor(185, 185, 185) : QColor(225, 225, 225);
-    if (underMouse())
-      fg = fg.lighter(115);
-    QFont f = font();
-    f.setWeight(QFont::DemiBold);
-    p.setFont(f);
-    p.setPen(fg);
-    double tri = r.height() * 0.22;
-    p.drawText(r.adjusted(4, 0, -(tri * 2 + 8), 0), Qt::AlignCenter, currentText());
-    double cx = r.right() - tri - 6, cy = r.center().y();
-    QPolygonF arrow;
-    arrow << QPointF(cx - tri, cy - tri * 0.5) << QPointF(cx + tri, cy - tri * 0.5)
-          << QPointF(cx, cy + tri * 0.7);
-    p.setPen(Qt::NoPen);
-    p.setBrush(fg);
-    p.drawPolygon(arrow);
+    if (underMouse()) {
+      double bw = 2 * g_uiScale;
+      p.setPen(QPen(QColor(128, 128, 128), bw));
+      p.setBrush(Qt::NoBrush);
+      p.drawRoundedRect(r.adjusted(bw / 2, bw / 2, -bw / 2, -bw / 2), 5, 5);
+    }
+    p.setFont(uiFont((box ? 11 : 12) * g_uiScale));
+    p.setPen(box ? COL_TITLE : COL_TEXT);
+    p.drawText(r, Qt::AlignCenter, currentText());
   }
 };
 
-// Fader with level meter(s), or a bare meter driven by an attached gain knob
-// (input channels). Mono faders put the meter on one side (SetMeterOnRight).
+// dB -> 0..1 from the top of a fader/meter, following the original scale
+// (labels -0/-6/-12/-24/-60 at 0, .163, .318, .628, 1 of the travel). Faders
+// with gain above 0 dB keep the top 10% for it.
+static double taperFrac(double db, double maxDb) {
+  static const double pts[][2] = {{0, 0}, {-6, .163}, {-12, .318}, {-24, .628}, {-60, 1}};
+  double top = maxDb > 0 ? 0.1 : 0.0;
+  if (db >= 0)
+    return maxDb > 0 ? top * (1.0 - std::min(db, maxDb) / maxDb) : 0.0;
+  double f = 1.0;
+  for (int i = 1; i < 5; ++i) {
+    if (db >= pts[i][0]) {
+      double t = (db - pts[i - 1][0]) / (pts[i][0] - pts[i - 1][0]);
+      f = pts[i - 1][1] + t * (pts[i][1] - pts[i - 1][1]);
+      break;
+    }
+  }
+  return top + (1.0 - top) * f;
+}
+
+// Fader + meters drawn with the original strip geometry. The widget covers
+// a strip area (design coords) and paints its parts at their original spots:
+//   FS_INPUT  meter-only input channel, value set by an attached gain knob
+//   FS_LINKED stereo fader in the middle, L/R meters outside
+//   FS_LEFT / FS_RIGHT  half of an unlinked strip (fader at the outer edge)
 class FaderStrip : public QWidget {
 public:
+  enum Layout { FS_INPUT, FS_LINKED, FS_LEFT, FS_RIGHT };
   QSize m_designSize;
   std::function<void(int)> onChange;
 
-  FaderStrip(QWidget *parent, int minVal, int maxVal, bool stereo = false,
-             QSize size = QSize(45, 120))
-      : QWidget(parent), m_designSize(size), m_min(minVal), m_max(maxVal),
-        m_stereo(stereo) {
-    if (m_designSize.width() <= 0 || m_designSize.height() <= 0)
-      m_designSize = QSize(45, 120);
-    setFocusPolicy(Qt::StrongFocus);
-    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    Rescale(g_uiScale);
+  // meterTop: y of the meters inside the strip (fader travel is 132 px)
+  FaderStrip(QWidget *parent, int minVal, int maxVal, Layout layout,
+             int meterTop = 80, bool stereo = false)
+      : QWidget(parent), m_min(minVal), m_max(maxVal), m_layout(layout),
+        m_meterTop(meterTop), m_stereo(stereo) {
+    setFocusPolicy(layout == FS_INPUT ? Qt::NoFocus : Qt::StrongFocus);
+    int ox = layout == FS_RIGHT ? 50 : 0;
+    int w = (layout == FS_LEFT || layout == FS_RIGHT) ? 50 : 100;
+    m_origin = QPoint(ox, meterTop - 18);
+    m_designSize = QSize(w, 18 + 132 + 4);
+    if (layout == FS_INPUT) {
+      m_origin = QPoint(0, 42);
+      m_designSize = QSize(100, 144);
+    }
+    place(this, m_origin.x(), m_origin.y(), m_designSize.width(),
+          m_designSize.height());
   }
 
   // Turns this strip into a meter; the knob edits the value instead.
   void AttachKnob(KnobControl *knob) {
     m_knob = knob;
-    setFocusPolicy(Qt::NoFocus);
     knob->SetValue(m_val);
     knob->onChange = [this](int v) { setUserValue(v); };
   }
@@ -1024,18 +1096,14 @@ public:
   void SetMeterLevels(int left, int right) {
     m_leftVal = std::clamp(left, -960, 10);
     m_rightVal = std::clamp(right, -960, 10);
-    m_leftPeak = std::max(m_leftPeak, m_leftVal);
-    m_rightPeak = std::max(m_rightPeak, m_rightVal);
     update();
   }
 
-  void SetMeterOnRight(bool onRight) {
-    m_meterOnRight = onRight;
-    update();
-  }
+  // Input meters: which of the two stereo positions this mono meter uses
+  void SetMeterSlot(int slot) { m_slot = slot; }
 
   void Rescale(double scale) {
-    setMinimumSize(m_designSize.width() * scale, m_designSize.height() * scale);
+    setFixedSize(m_designSize.width() * scale, m_designSize.height() * scale);
   }
 
 protected:
@@ -1056,154 +1124,185 @@ protected:
       setUserValue(m_val + (e->angleDelta().y() > 0 ? 1 : -1));
   }
 
-  void focusInEvent(QFocusEvent *) override { update(); }
-  void focusOutEvent(QFocusEvent *) override { update(); }
+  static constexpr double TRAVEL = 132, HANDLE = 10;
 
-  // value readout row (faders only; inputs show the peak button instead)
-  double top() const { return m_knob ? 6.0 : 18.0; }
-  static constexpr double BOTTOM = 6.0;
+  // fader x (strip coords) and width
+  double faderX() const {
+    return m_layout == FS_LINKED ? 42 : m_layout == FS_LEFT ? 4 : 84;
+  }
+  double faderW() const { return m_layout == FS_LINKED ? 16 : 12; }
+
+  double valToY(int v) const { // handle centre, strip coords
+    double f = v <= m_min ? 1.0 : taperFrac(v, m_max);
+    return m_meterTop + HANDLE / 2 + f * (TRAVEL - HANDLE);
+  }
+  int yToVal(double y) const {
+    // search: taper is monotonic
+    int best = m_min;
+    double bestD = 1e9;
+    for (int v = m_min; v <= m_max; ++v) {
+      double d = std::abs(valToY(v) - y);
+      if (d < bestD) {
+        bestD = d;
+        best = v;
+      }
+    }
+    return best;
+  }
+
+  void drawMeter(QPainter &p, QRectF r, int level, bool clipLed, double clipH) {
+    // QProgressBar with inverted chunk: gradient body, unlit part on top
+    QLinearGradient g(r.topLeft(), r.bottomLeft());
+    g.setColorAt(0, QColor(0xf6, 0x48, 0x47));
+    g.setColorAt(0.15, QColor(0xa7, 0x7d, 0x43));
+    g.setColorAt(0.3, QColor(0x0f, 0x96, 0x40));
+    g.setColorAt(1, QColor(0x00, 0x96, 0x41));
+    p.setPen(Qt::NoPen);
+    p.setBrush(g);
+    p.drawRoundedRect(r, 1, 1);
+    double f = level <= -600 ? 1.0 : taperFrac(level / 10.0, 0);
+    p.setBrush(COL_METER_BG);
+    p.drawRect(QRectF(r.x(), r.y(), r.width(), r.height() * f));
+    if (clipLed) {
+      p.setBrush(level >= -10 ? COL_CLIP : COL_METER_BG);
+      p.drawRoundedRect(QRectF(r.x(), r.y() - 6, r.width(), clipH), 1, 1);
+    }
+  }
+
+  void drawScale(QPainter &p, double x, double w, Qt::Alignment align) {
+    p.setFont(uiFont(8));
+    p.setPen(COL_SCALE);
+    for (int db : {0, -6, -12, -24, -60}) {
+      double y = m_meterTop + HANDLE / 2 + taperFrac(db, m_max) * (TRAVEL - HANDLE);
+      p.drawText(QRectF(x, y - 6, w, 12), align | Qt::AlignVCenter,
+                 db == 0 ? "-0" : QString::number(db));
+    }
+  }
+
+  // Input meter rows (label_keduL1..L7 centres): 0 -6 -12 -24 -36 -60 dB
+  static double inputFrac(double db) {
+    static const double pts[][2] = {{0, 0},           {-6, 12 / 134.0},
+                                    {-12, 26 / 134.0}, {-24, 53 / 134.0},
+                                    {-36, 80 / 134.0}, {-60, 132 / 134.0}};
+    if (db >= 0)
+      return 0;
+    for (int i = 1; i < 6; ++i)
+      if (db >= pts[i][0])
+        return pts[i - 1][1] + (db - pts[i - 1][0]) / (pts[i][0] - pts[i - 1][0]) *
+                                   (pts[i][1] - pts[i - 1][1]);
+    return 1;
+  }
 
   void paintEvent(QPaintEvent *) override {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    p.scale(g_uiScale, g_uiScale);
-    double dx = width() / g_uiScale, dy = height() / g_uiScale;
-    double ySlot = top(), hSlot = dy - top() - BOTTOM;
-    bool meterOnly = m_knob != nullptr;
+    double s = (double)width() / m_designSize.width();
+    p.scale(s, s);
+    p.translate(-m_origin.x(), -m_origin.y());
+    double T = m_meterTop;
 
-    QFont small = font();
-    small.setPointSizeF(6.5);
-    small.setWeight(QFont::DemiBold);
-    QFont top_ = font();
-    top_.setPointSizeF(8);
-    top_.setWeight(QFont::DemiBold);
-    QFontMetricsF fm(small);
-
-    // Positions: meter(s), scale labels and the fader track
-    const double mw = meterOnly ? 9.0 : 6.0;
-    double cx = dx / 2.0;
-    double trackX = cx, meterL = -1, meterR = -1;
-    enum { LABEL_LEFT, LABEL_RIGHT, LABEL_BOTH } labelSide;
-    if (m_stereo) {
-      meterL = meterOnly ? 4 : cx - 32;
-      meterR = meterOnly ? dx - 4 - mw : cx + 32 - mw;
-      labelSide = LABEL_BOTH;
-    } else if (meterOnly) {
-      meterL = 6;
-      labelSide = LABEL_RIGHT;
-    } else if (m_meterOnRight) {
-      trackX = 9;
-      meterR = dx - 5 - mw;
-      labelSide = LABEL_RIGHT;
-    } else {
-      trackX = dx - 9;
-      meterL = 5;
-      labelSide = LABEL_LEFT;
-    }
-
-    // 1. Meters
-    auto levelY = [&](int v) {
-      double pct = std::clamp((double)(v + 960) / 970.0, 0.0, 1.0);
-      return ySlot + hSlot - hSlot * pct;
-    };
-    auto drawMeter = [&](double x, int val, int peak) {
+    if (m_layout == FS_INPUT) {
+      // Input / InputMobile: 14 px meter (12 px each when stereo)
       p.setPen(Qt::NoPen);
-      p.fillRect(QRectF(x, ySlot, mw, hSlot), COL_METER_BG);
-      double y = levelY(val);
-      if (ySlot + hSlot - y > 0) {
-        p.fillRect(QRectF(x, y, mw, ySlot + hSlot - y), COL_GREEN);
-        if (val > -120)
-          p.fillRect(QRectF(x, y, mw, levelY(-120) - y), COL_YELLOW);
-        if (val > -30)
-          p.fillRect(QRectF(x, y, mw, levelY(-30) - y), COL_RED);
+      auto meter = [&](double x, double w, int lvl) {
+        QLinearGradient g(0, 50, 0, 184);
+        g.setColorAt(0, QColor(0xf6, 0x48, 0x47));
+        g.setColorAt(0.15, QColor(0xa7, 0x7d, 0x43));
+        g.setColorAt(0.3, QColor(0x0f, 0x96, 0x40));
+        g.setColorAt(1, QColor(0x00, 0x96, 0x41));
+        p.setBrush(g);
+        p.drawRoundedRect(QRectF(x, 50, w, 134), 1, 1);
+        double f = inputFrac(lvl / 10.0);
+        p.setBrush(COL_METER_BG);
+        p.drawRect(QRectF(x, 50, w, 134 * f));
+        p.setBrush(lvl >= -10 ? COL_CLIP : COL_METER_BG);
+        p.drawRoundedRect(QRectF(x, 44, w, 3), 1, 1);
+      };
+      if (m_stereo) {
+        meter(20, 12, m_leftVal);
+        meter(68, 12, m_rightVal);
+      } else if (m_slot == 1) {
+        meter(68, 12, m_leftVal);
+      } else if (m_slot == 0) {
+        meter(20, 12, m_leftVal);
+      } else {
+        meter(16, 14, m_leftVal);
       }
-      if (peak > -960) {
-        double yp = levelY(peak);
-        p.fillRect(QRectF(x, yp - 0.5, mw, 1.2), QColor(230, 230, 230));
+      p.setFont(uiFont(8));
+      p.setPen(COL_SCALE);
+      bool both = m_stereo || m_slot >= 0;
+      for (int db : {0, -6, -12, -24, -36, -60}) {
+        double y = 50 + 134 * inputFrac(db);
+        QString t = db == 0 ? "0" : QString::number(db);
+        if (both) {
+          p.drawText(QRectF(2, y - 6, 16, 12), Qt::AlignRight | Qt::AlignVCenter, t);
+          p.drawText(QRectF(82, y - 6, 18, 12), Qt::AlignLeft | Qt::AlignVCenter, t);
+        } else {
+          p.drawText(QRectF(32, y - 6, 24, 12), Qt::AlignLeft | Qt::AlignVCenter, t);
+        }
       }
-    };
-    if (meterL >= 0)
-      drawMeter(meterL, m_leftVal, m_leftPeak);
-    if (meterR >= 0)
-      drawMeter(meterR, m_stereo ? m_rightVal : m_leftVal,
-                m_stereo ? m_rightPeak : m_leftPeak);
-
-    // 2. Scale: meters show the -60..0 dBFS scale, faders their gain range
-    std::vector<int> ticks;
-    int lo = meterOnly ? -60 : m_min, hi = meterOnly ? 0 : m_max;
-    for (int db : {0, -6, -12, -24, -36, -60})
-      if (db >= lo && db <= hi)
-        ticks.push_back(db);
-    auto scaleY = [&](int db) {
-      double pct = std::clamp((double)(db - lo) / (hi - lo), 0.0, 1.0);
-      return ySlot + hSlot - hSlot * pct;
-    };
-    p.setFont(small);
-    p.setPen(COL_SCALE);
-    double lblLeftEdge, lblRightEdge; // where labels end / start
-    if (meterOnly) {
-      lblLeftEdge = (meterL >= 0 ? meterL + mw : 0) + 3;
-      lblRightEdge = (meterR >= 0 ? meterR : dx) - 3;
-    } else {
-      lblLeftEdge = trackX + 8;
-      lblRightEdge = trackX - 8;
-    }
-    for (int db : ticks) {
-      double y = scaleY(db);
-      QString lbl = meterOnly ? QString::number(db)
-                              : (db <= m_min ? QString::fromUtf8("-∞")
-                                             : dbText(db, m_min));
-      double tw = fm.horizontalAdvance(lbl), th = fm.height();
-      if (labelSide == LABEL_RIGHT || labelSide == LABEL_BOTH) {
-        p.drawLine(QPointF(lblLeftEdge, y), QPointF(lblLeftEdge + 3, y));
-        p.drawText(QRectF(lblLeftEdge + 5, y - th / 2, tw + 2, th),
-                   Qt::AlignLeft | Qt::AlignVCenter, lbl);
-      }
-      if (labelSide == LABEL_LEFT || labelSide == LABEL_BOTH) {
-        p.drawLine(QPointF(lblRightEdge - 3, y), QPointF(lblRightEdge, y));
-        p.drawText(QRectF(lblRightEdge - 5 - tw - 2, y - th / 2, tw + 2, th),
-                   Qt::AlignRight | Qt::AlignVCenter, lbl);
-      }
-    }
-
-    // 3. Fader value readout
-    if (meterOnly)
       return;
-    p.setFont(top_);
-    p.setPen(QColor(205, 205, 205));
-    p.drawText(QRectF(trackX - 14, 0, 28, top() - 2), Qt::AlignCenter,
-               dbText(m_val, m_min));
-
-    // 4. Fader: filled track below the cap, then the cap
-    double yVal = ValToY(m_val, hSlot, ySlot);
-    p.fillRect(QRectF(trackX - 1.5, ySlot, 3, hSlot), QColor(36, 36, 36));
-    p.setPen(Qt::NoPen);
-    p.setBrush(COL_TRACK);
-    p.drawRoundedRect(QRectF(trackX - 3, yVal, 6, ySlot + hSlot - yVal), 2, 2);
-    double hh = 13.0, hw = 15.0;
-    p.setBrush(COL_HANDLE);
-    p.drawRect(QRectF(trackX - hw / 2, yVal - hh / 2, hw, hh));
-    p.setPen(QPen(QColor(150, 150, 150), 1));
-    p.drawLine(QPointF(trackX - hw / 2 + 2, yVal), QPointF(trackX + hw / 2 - 2, yVal));
-
-    if (hasFocus()) {
-      p.setPen(QPen(QColor(80, 120, 200), 1));
-      p.setBrush(Qt::NoBrush);
-      p.drawRect(QRectF(trackX - hw / 2 - 1.5, yVal - hh / 2 - 1.5, hw + 3, hh + 3));
     }
+
+    bool linked = m_layout == FS_LINKED;
+    int post = m_val <= m_min ? -960 : 0;
+    auto postFader = [&](int lvl) { return post ? post : lvl + m_val * 10; };
+
+    // value readout
+    p.setFont(uiFont(9));
+    p.setPen(COL_TITLE);
+    QRectF valR = linked ? QRectF(34, T - (T > 80 ? 13 : 16), 32, 12)
+                         : m_layout == FS_LEFT ? QRectF(0, T - 10, 24, 12)
+                                               : QRectF(76, T - 10, 24, 12);
+    p.drawText(valR, Qt::AlignCenter, dbText(m_val, m_min));
+
+    // meters: outer = level, inner thin bar = post-fader level
+    if (linked) {
+      drawMeter(p, QRectF(14, T, 8, TRAVEL), m_leftVal, true, 4);
+      drawMeter(p, QRectF(25, T, 4, TRAVEL), postFader(m_leftVal), true, 4);
+      drawMeter(p, QRectF(71, T, 4, TRAVEL), postFader(m_rightVal), true, 4);
+      drawMeter(p, QRectF(78, T, 8, TRAVEL), m_rightVal, true, 4);
+      drawScale(p, 28, 14, Qt::AlignRight);
+      drawScale(p, 58, 14, Qt::AlignLeft);
+    } else if (m_layout == FS_LEFT) {
+      drawMeter(p, QRectF(30, T, 8, TRAVEL), m_leftVal, true, 4);
+      drawMeter(p, QRectF(41, T, 4, TRAVEL), postFader(m_leftVal), true, 4);
+      drawScale(p, 15, 14, Qt::AlignRight);
+    } else {
+      drawMeter(p, QRectF(55, T, 4, TRAVEL), postFader(m_leftVal), true, 4);
+      drawMeter(p, QRectF(62, T, 8, TRAVEL), m_leftVal, true, 4);
+      drawScale(p, 71, 14, Qt::AlignLeft);
+    }
+
+    // QSlider: groove #333 inset 4 px, rgb(161) below the handle, #d8d8d8
+    // handle 10 px high overhanging the groove by 6 px
+    double fx = faderX(), fw = faderW();
+    QRectF groove(fx + 4, T, fw - 8, TRAVEL);
+    double yv = valToY(m_val);
+    p.setPen(Qt::NoPen);
+    p.setBrush(COL_GROOVE);
+    p.drawRoundedRect(groove, 2, 2);
+    p.setBrush(COL_TRACK);
+    p.drawRoundedRect(QRectF(groove.x(), yv, groove.width(), groove.bottom() - yv), 2, 2);
+    p.setBrush(hasFocus() ? QColor(240, 240, 240) : COL_HANDLE);
+    p.drawRoundedRect(QRectF(groove.x() - 6, yv - HANDLE / 2, groove.width() + 12, HANDLE), 3, 3);
+  }
+
+  QPointF toDesign(QPointF pos) const {
+    double s = (double)width() / m_designSize.width();
+    return pos / s + QPointF(m_origin);
   }
 
   void mousePressEvent(QMouseEvent *e) override {
-    if (m_knob || e->button() != Qt::LeftButton)
+    if (m_layout == FS_INPUT || e->button() != Qt::LeftButton)
       return;
     setFocus();
     m_isDragging = true;
-    double hSlot = height() / g_uiScale - top() - BOTTOM;
-    m_dragStartY = e->position().y() / g_uiScale;
-    // grab the cap where it is; clicking elsewhere jumps to that point
-    double capY = ValToY(m_val, hSlot, top());
-    if (std::abs(m_dragStartY - capY) > 8)
-      setUserValue(YToVal(m_dragStartY, hSlot, top()));
+    double y = toDesign(e->position()).y();
+    // grab the handle where it is; clicking elsewhere jumps to that point
+    if (std::abs(y - valToY(m_val)) > HANDLE)
+      setUserValue(yToVal(y));
+    m_dragStartY = y;
     m_dragStartVal = m_val;
   }
 
@@ -1212,35 +1311,27 @@ protected:
   void mouseMoveEvent(QMouseEvent *e) override {
     if (!m_isDragging)
       return;
-    double hSlot = height() / g_uiScale - top() - BOTTOM;
-    double dy = e->position().y() / g_uiScale - m_dragStartY;
-    setUserValue(YToVal(ValToY(m_dragStartVal, hSlot, top()) + dy, hSlot, top()));
+    double dy = toDesign(e->position()).y() - m_dragStartY;
+    setUserValue(yToVal(valToY(m_dragStartVal) + dy));
   }
 
   void mouseDoubleClickEvent(QMouseEvent *) override {
-    if (!m_knob)
+    if (m_layout != FS_INPUT)
       setUserValue(0);
   }
 
 private:
   int m_val = 0, m_min, m_max;
+  Layout m_layout;
+  int m_meterTop;
   bool m_stereo;
-  int m_leftVal = -960, m_rightVal = -960, m_leftPeak = -960, m_rightPeak = -960;
+  int m_slot = -1;
+  QPoint m_origin;
+  int m_leftVal = -960, m_rightVal = -960;
   bool m_isDragging = false;
   int m_dragStartVal = 0;
   double m_dragStartY = 0;
-  bool m_meterOnRight = false;
   KnobControl *m_knob = nullptr;
-
-  double ValToY(int val, double hSlot, double ySlot) {
-    double pct = std::clamp((double)(val - m_min) / (m_max - m_min), 0.0, 1.0);
-    return ySlot + hSlot - hSlot * pct;
-  }
-
-  int YToVal(double y, double hSlot, double ySlot) {
-    double pct = std::clamp((ySlot + hSlot - y) / hSlot, 0.0, 1.0);
-    return m_min + std::round(pct * (m_max - m_min));
-  }
 
   void setUserValue(int v) {
     v = std::clamp(v, m_min, m_max);
@@ -1439,16 +1530,18 @@ static const QStringList OutputSels = {
     "Playback7+8", "MIX A",       "MIX B",       "MIX C", "MIX D",
 };
 
-// Channel strip: dark rounded column with a grey title box on top
+// Channel strip: fixed 100 px wide #161616 panel with the grey title box on
+// top; children are placed at their original design coordinates.
 static QWidget *mkStrip(QWidget *parent, QLabel *&title, const QString &name,
-                        QVBoxLayout *&layout) {
+                        int height) {
   auto *strip = new QWidget(parent);
   strip->setObjectName("stripPanel");
   strip->setAttribute(Qt::WA_StyledBackground);
-  layout = vbox(strip, 0, 3);
-  layout->setContentsMargins(0, 0, 0, 6);
-  title = mkTitleBox(strip, name);
-  layout->addWidget(title);
+  strip->setProperty("dsz", QSize(100, height));
+  strip->setFixedSize(100 * g_uiScale, height * g_uiScale);
+  title = mkPxLabel(strip, name, 11, COL_TITLE);
+  title->setObjectName("titleBox");
+  place(title, 0, 0, 100, 20);
   return strip;
 }
 
@@ -1457,6 +1550,34 @@ static QLabel *mkHiddenLabel(QWidget *parent) {
   auto *l = new QLabel(parent);
   l->hide();
   return l;
+}
+
+// Section: "Title |" row above a row of strips
+static QHBoxLayout *mkSection(QWidget *w, const QString &title,
+                              QHBoxLayout *&head) {
+  setBg(w, COL_SECTION);
+  auto *mainSizer = vbox(w);
+  head = titleRow(w, title);
+  mainSizer->addLayout(head);
+  auto *strips = hbox(nullptr, 0, 8);
+  strips->setContentsMargins(6, 0, 6, 10);
+  mainSizer->addLayout(strips, 1);
+  return strips;
+}
+
+static CustomButton *mkBtn(QWidget *strip, const QString &label,
+                           const QColor &on, int x, int y, int w, int h) {
+  auto *b = new CustomButton(strip, label, true, QSize(w, h), on);
+  place(b, x, y, w, h);
+  return b;
+}
+
+static CustomButton *mkLink(QWidget *strip, int y) {
+  auto *b = new CustomButton(strip, "Link", true, QSize(28, 16), COL_BLUE,
+                             ICON_NONE, BTN_TEXT);
+  place(b, 36, y, 28, 16);
+  b->SetValue(true);
+  return b;
 }
 
 class PanelInputs : public QWidget {
@@ -1495,127 +1616,84 @@ public:
   int32_t inLevelVal[N_INPUTS];
 
   PanelInputs(QWidget *parent, uint16_t pid = 0x8754) : QWidget(parent) {
-    setBg(this, COL_SECTION);
     std::fill(std::begin(PeaksI), std::end(PeaksI), LEVEL_MIN);
     std::fill(std::begin(inLevelVal), std::end(inLevelVal), LEVEL_MIN);
+    QHBoxLayout *head;
+    auto *colsSizer = mkSection(this, "Input", head);
+    head->addStretch(1);
 
-    auto *mainSizer = vbox(this);
-    auto *title = titleRow(this, "Input");
-    title->addStretch(1);
-    mainSizer->addLayout(title);
-
-    auto *colsSizer = hbox(nullptr, 8, 8);
-    colsSizer->setContentsMargins(8, 0, 8, 8);
     int numCols = (pid == 0x8754) ? 3 : ((pid == 0x8752 || pid == 0x8756) ? 2 : 1);
     bool isE1x2 = pid == 0x8755;
 
     for (int col = 0; col < numCols; ++col) {
       QString colName = col == 0 ? (isE1x2 ? "Analog IN" : "IN 1")
                                  : (col == 1 ? "IN 2" : "IN 3+4");
-      QVBoxLayout *cs;
-      QWidget *colPanel = mkStrip(this, lbTitleI[col], colName, cs);
-      colPanel->setObjectName("colPanel");
-      lbGainVal[col] = mkHiddenLabel(colPanel);
+      QWidget *sp = mkStrip(this, lbTitleI[col], colName, 274);
+      lbGainVal[col] = mkHiddenLabel(sp);
 
       // Peak readout (click to reset)
-      lbPeaksI[col] = new CustomButton(colPanel, "-60.0", false, QSize(45, 16),
+      lbPeaksI[col] = new CustomButton(sp, "-60.0", false, QSize(36, 14),
                                        COL_BLUE, ICON_NONE, BTN_TEXT);
-      cs->addSpacing(4);
-      cs->addWidget(lbPeaksI[col], 0, Qt::AlignHCenter);
-
-      auto *midSizer = hbox(nullptr, 0, 4);
-      midSizer->setContentsMargins(6, 0, 6, 0);
-      QWidget *btnColW = new QWidget(colPanel);
-      auto *btnCol = vbox(btnColW, 0, 3);
-      auto addC = [](QVBoxLayout *l, QWidget *w) { l->addWidget(w, 0, Qt::AlignHCenter); };
-      auto *knobRow = hbox(nullptr, 0, 4);
+      place(lbPeaksI[col], 4, 27, 36, 14);
 
       if (col < 2) {
-        slGainI[col] = new FaderStrip(colPanel, minGain, maxGain, false, QSize(44, 150));
-        midSizer->addWidget(slGainI[col], 1);
-
-        cbMon[col] = new CustomButton(btnColW, "MON", true, QSize(36, 17), COL_GREEN);
-        cb48V[col] = new CustomButton(btnColW, "48V", true, QSize(36, 17), COL_RED);
-        cbInst[col] = new CustomButton(btnColW, "INST", true, QSize(36, 17), COL_GREEN);
-        cbSolo[col] = new CustomButton(btnColW, "SOLO", true, QSize(36, 17), COL_YELLOW);
-        cbMute[col] = new CustomButton(btnColW, "MUTE", true, QSize(36, 17), COL_RED);
-        cbPhase[col] = new CustomButton(btnColW, QString::fromUtf8("ø"), true, QSize(36, 17), COL_GREEN);
-        for (auto *b : {cbMon[col], cb48V[col], cbInst[col]})
-          addC(btnCol, b);
-        btnCol->addSpacing(12);
-        for (auto *b : {cbSolo[col], cbMute[col], cbPhase[col]})
-          addC(btnCol, b);
-
-        auto *knob = new KnobControl(colPanel, "Gain", minGain, maxGain, 0, QSize(64, 78), true);
+        // Input form: meter at x16, buttons at x60, gain knob below
+        slGainI[col] = new FaderStrip(sp, minGain, maxGain, FaderStrip::FS_INPUT);
+        cbMon[col] = mkBtn(sp, "MON", COL_MON, 60, 44, 30, 16);
+        cb48V[col] = mkBtn(sp, "48V", COL_48V, 60, 64, 30, 16);
+        cbInst[col] = mkBtn(sp, "INST", COL_INST, 60, 84, 30, 16);
+        cbSolo[col] = mkBtn(sp, "SOLO", COL_SOLO, 60, 116, 30, 16);
+        cbMute[col] = mkBtn(sp, "MUTE", COL_MUTE, 60, 136, 30, 16);
+        cbPhase[col] = mkBtn(sp, QString::fromUtf8("ø"), COL_PHASE, 60, 156, 30, 16);
+        auto *knob = new KnobControl(sp, "Gain", minGain, maxGain, 0, QSize(64, 80), true);
+        knob->SetRingWidth(5);
+        place(knob, 18, 192, 64, 80);
         slGainI[col]->AttachKnob(knob);
-        knobRow->addWidget(knob);
       } else {
-        // Stereo channel IN 3+4
-        slGainI[2] = new FaderStrip(colPanel, minGain, maxGain, false, QSize(26, 150));
-        slGainI[3] = new FaderStrip(colPanel, minGain, maxGain, false, QSize(26, 150));
-        slGainICombined = new FaderStrip(colPanel, minGain, maxGain, true, QSize(44, 150));
-        midSizer->addWidget(slGainI[2], 1);
-        midSizer->addWidget(slGainI[3], 1);
-        midSizer->addWidget(slGainICombined, 1);
+        // Stereo channel IN 3+4, laid out like the original InputMobile form
+        slGainI[2] = new FaderStrip(sp, minGain, maxGain, FaderStrip::FS_INPUT);
+        slGainI[2]->SetMeterSlot(0);
+        slGainI[3] = new FaderStrip(sp, minGain, maxGain, FaderStrip::FS_INPUT);
+        slGainI[3]->SetMeterSlot(1);
+        slGainICombined = new FaderStrip(sp, minGain, maxGain, FaderStrip::FS_INPUT, 80, true);
 
-        btnLink = new CustomButton(btnColW, "Link", true, QSize(36, 16), COL_BLUE, ICON_NONE, BTN_TEXT);
+        btnLink = new CustomButton(sp, "Link", true, QSize(30, 16), COL_BLUE, ICON_NONE, BTN_TEXT);
+        place(btnLink, 35, 45, 30, 16);
         btnLink->SetValue(true);
-        addC(btnCol, btnLink);
-        btnCol->addSpacing(8);
 
-        combBtns = new QWidget(btnColW);
-        auto *comb = vbox(combBtns, 0, 3);
-        cbSolo[col] = new CustomButton(combBtns, "SOLO", true, QSize(36, 17), COL_YELLOW);
-        cbMute[col] = new CustomButton(combBtns, "MUTE", true, QSize(36, 17), COL_RED);
-        cbPhase[col] = new CustomButton(combBtns, QString::fromUtf8("ø"), true, QSize(36, 17), COL_GREEN);
-        for (auto *b : {cbSolo[col], cbMute[col], cbPhase[col]})
-          addC(comb, b);
-        btnCol->addWidget(combBtns);
+        combBtns = new QWidget(sp);
+        place(combBtns, 35, 116, 30, 56);
+        cbSolo[col] = mkBtn(combBtns, "SOLO", COL_SOLO, 0, 0, 30, 16);
+        cbMute[col] = mkBtn(combBtns, "MUTE", COL_MUTE, 0, 20, 30, 16);
+        cbPhase[col] = mkBtn(combBtns, QString::fromUtf8("ø"), COL_PHASE, 0, 40, 30, 16);
 
-        splitBtns = new QWidget(btnColW);
-        auto *split = hbox(splitBtns, 0, 2);
-        auto *lc = vbox(nullptr, 0, 3), *rc = vbox(nullptr, 0, 3);
-        cbSoloL = new CustomButton(splitBtns, "S", true, QSize(17, 17), COL_YELLOW);
-        cbMuteL = new CustomButton(splitBtns, "M", true, QSize(17, 17), COL_RED);
-        cbPhaseL = new CustomButton(splitBtns, QString::fromUtf8("ø"), true, QSize(17, 17), COL_GREEN);
-        cbSoloR = new CustomButton(splitBtns, "S", true, QSize(17, 17), COL_YELLOW);
-        cbMuteR = new CustomButton(splitBtns, "M", true, QSize(17, 17), COL_RED);
-        cbPhaseR = new CustomButton(splitBtns, QString::fromUtf8("ø"), true, QSize(17, 17), COL_GREEN);
-        for (auto *b : {cbSoloL, cbMuteL, cbPhaseL})
-          lc->addWidget(b);
-        for (auto *b : {cbSoloR, cbMuteR, cbPhaseR})
-          rc->addWidget(b);
-        split->addLayout(lc, 1);
-        split->addLayout(rc, 1);
-        btnCol->addWidget(splitBtns);
+        splitBtns = new QWidget(sp);
+        place(splitBtns, 34, 116, 32, 56);
+        cbSoloL = mkBtn(splitBtns, "S", COL_SOLO, 0, 0, 15, 16);
+        cbMuteL = mkBtn(splitBtns, "M", COL_MUTE, 0, 20, 15, 16);
+        cbPhaseL = mkBtn(splitBtns, QString::fromUtf8("ø"), COL_PHASE, 0, 40, 15, 16);
+        cbSoloR = mkBtn(splitBtns, "S", COL_SOLO, 17, 0, 15, 16);
+        cbMuteR = mkBtn(splitBtns, "M", COL_MUTE, 17, 20, 15, 16);
+        cbPhaseR = mkBtn(splitBtns, QString::fromUtf8("ø"), COL_PHASE, 17, 40, 15, 16);
 
-        auto *knobC = new KnobControl(colPanel, "Gain", minGain, maxGain, 0, QSize(64, 78), true);
-        auto *knobL = new KnobControl(colPanel, "Gain", minGain, maxGain, 0, QSize(46, 60), true);
-        auto *knobR = new KnobControl(colPanel, "Gain", minGain, maxGain, 0, QSize(46, 60), true);
+        auto *knobC = new KnobControl(sp, "Gain", minGain, maxGain, 0, QSize(64, 80), true);
+        auto *knobL = new KnobControl(sp, "Gain", minGain, maxGain, 0, QSize(46, 62), true);
+        auto *knobR = new KnobControl(sp, "Gain", minGain, maxGain, 0, QSize(46, 62), true);
+        for (auto *k : {knobC, knobL, knobR})
+          k->SetRingWidth(5);
+        place(knobC, 18, 192, 64, 80);
+        place(knobL, 3, 204, 46, 62);
+        place(knobR, 51, 204, 46, 62);
         slGainICombined->AttachKnob(knobC);
         slGainI[2]->AttachKnob(knobL);
         slGainI[3]->AttachKnob(knobR);
-        knobRow->addWidget(knobL);
-        knobRow->addWidget(knobR);
-        knobRow->addWidget(knobC);
         slGainI[2]->setVisible(false);
         slGainI[3]->setVisible(false);
         splitBtns->hide();
       }
-      midSizer->addWidget(btnColW, 0, Qt::AlignVCenter);
-      cs->addLayout(midSizer, 1);
-      cs->addSpacing(6);
-      auto *knobWrap = hbox();
-      knobWrap->addStretch(1);
-      knobWrap->addLayout(knobRow);
-      knobWrap->addStretch(1);
-      cs->addLayout(knobWrap);
-
-      colPanel->setMinimumWidth(120);
-      colsSizer->addWidget(colPanel);
+      colsSizer->addWidget(sp);
     }
     colsSizer->addStretch(1);
-    mainSizer->addLayout(colsSizer, 1);
   }
 };
 
@@ -1659,156 +1737,114 @@ public:
   int32_t mixLevelVal[N_MIX_SRCS];
 
   PanelMixers(QWidget *parent) : QWidget(parent) {
-    setBg(this, COL_SECTION);
     std::fill(std::begin(mixLevelVal), std::end(mixLevelVal), LEVEL_MIN);
+    QHBoxLayout *head;
+    auto *stripsSizer = mkSection(this, "Mixer", head);
 
-    auto *mainSizer = vbox(this);
-    auto *title = titleRow(this, "Mixer");
-    title->addSpacing(14);
-    const QColor tabColors[4] = {QColor(140, 200, 120), QColor(40, 120, 220),
-                                 QColor(200, 190, 60), QColor(220, 150, 30)};
+    // MixerRoutingA..D: selected color / idle (darker) color
+    const QColor tabOn[4] = {QColor(0x75, 0xcb, 0x75), QColor(0x30, 0x9b, 0xe8),
+                             QColor(0xeb, 0xcd, 0x29), QColor(0xff, 0xa5, 0x00)};
+    const QColor tabOff[4] = {QColor(0x5e, 0xa2, 0x5e), QColor(0x26, 0x7c, 0xba),
+                              QColor(0xbc, 0xa4, 0x21), QColor(0xcc, 0x84, 0x00)};
     const char *mixNames[4] = {"Mix A", "Mix B", "Mix C", "Mix D"};
     for (int i = 0; i < N_MIXERS; ++i) {
-      tabButtons[i] = new CustomButton(this, mixNames[i], true, QSize(64, 22),
-                                       tabColors[i], ICON_NONE, BTN_TAB);
-      title->addWidget(tabButtons[i], 0, Qt::AlignVCenter);
-      title->addSpacing(10);
+      tabButtons[i] = new CustomButton(this, mixNames[i], true, QSize(60, 22),
+                                       tabOn[i], ICON_NONE, BTN_TAB);
+      tabButtons[i]->SetIdleColor(tabOff[i]);
+      head->addWidget(tabButtons[i], 0, Qt::AlignVCenter);
     }
     tabButtons[0]->SetValue(true);
-    title->addStretch(1);
-    mainSizer->addLayout(title);
+    head->addStretch(1);
 
     const char *Titles[N_STRIPS] = {"IN1+2",        "Disconnected", "Playback 1/2",
                                     "Playback 3/4", "Playback 5/6", "Playback 7/8"};
-    auto *stripsSizer = hbox(nullptr, 0, 8);
-    stripsSizer->setContentsMargins(8, 0, 8, 8);
     for (int i = 0; i < N_STRIPS; ++i) {
-      QVBoxLayout *ss;
-      QWidget *sp = mkStrip(this, lbTitle[i], Titles[i], ss);
+      QWidget *sp = mkStrip(this, lbTitle[i], Titles[i], 276);
 
       int l = i * 2, r = l + 1;
-      auto *panRow = hbox(nullptr, 0, 0);
-      slPan[l] = new KnobControl(sp, "Pan L", -100, 100, -100, QSize(34, 34));
-      slPan[r] = new KnobControl(sp, "Pan R", -100, 100, 100, QSize(34, 34));
-      panRow->addWidget(slPan[l], 1, Qt::AlignHCenter);
-      panRow->addWidget(slPan[r], 1, Qt::AlignHCenter);
-      ss->addSpacing(4);
-      ss->addLayout(panRow);
+      slPan[l] = new KnobControl(sp, "Pan L", -100, 100, -100, QSize(42, 34));
+      slPan[r] = new KnobControl(sp, "Pan R", -100, 100, 100, QSize(42, 34));
+      place(slPan[l], 10, 22, 42, 34);
+      place(slPan[r], 52, 22, 42, 34);
 
-      btnLink[i] = new CustomButton(sp, "Link", true, QSize(40, 16), COL_BLUE, ICON_NONE, BTN_TEXT);
+      btnLink[i] = mkLink(sp, 55);
       btnLink[i]->SetValue(i != 0);
-      ss->addWidget(btnLink[i], 0, Qt::AlignHCenter);
-
       lbVolVal[i] = mkHiddenLabel(sp);
 
-      auto *faderSizer = hbox();
-      faderSizer->setContentsMargins(2, 0, 2, 2);
-      slVol[i] = new FaderStrip(sp, minGain, maxGain, true, QSize(80, 150));
-      slVolL[i] = new FaderStrip(sp, minGain, maxGain, false, QSize(40, 150));
-      slVolL[i]->SetMeterOnRight(true);
-      slVolR[i] = new FaderStrip(sp, minGain, maxGain, false, QSize(40, 150));
-      faderSizer->addWidget(slVolL[i], 1);
-      faderSizer->addWidget(slVolR[i], 1);
-      faderSizer->addWidget(slVol[i], 1);
+      slVol[i] = new FaderStrip(sp, minGain, maxGain, FaderStrip::FS_LINKED, 82);
+      slVolL[i] = new FaderStrip(sp, minGain, maxGain, FaderStrip::FS_LEFT, 82);
+      slVolR[i] = new FaderStrip(sp, minGain, maxGain, FaderStrip::FS_RIGHT, 82);
       if (i == 0) {
         slVol[i]->hide();
       } else {
         slVolL[i]->hide();
         slVolR[i]->hide();
       }
-      ss->addLayout(faderSizer, 1);
 
+      // Mixer_link: ø / SOLO / MUTE 40x16 at x30; Mixer: 32x16 at x10 / x58
       combBtns[i] = new QWidget(sp);
-      auto *comb = vbox(combBtns[i], 0, 3);
-      ckPhaseCombined[i] = new CustomButton(combBtns[i], QString::fromUtf8("ø"), true, QSize(46, 18), COL_GREEN);
-      ckSolo[i] = new CustomButton(combBtns[i], "SOLO", true, QSize(46, 18), COL_YELLOW);
-      ckMute[i] = new CustomButton(combBtns[i], "MUTE", true, QSize(46, 18), COL_RED);
-      for (auto *b : {ckPhaseCombined[i], ckSolo[i], ckMute[i]})
-        comb->addWidget(b, 0, Qt::AlignHCenter);
+      place(combBtns[i], 30, 218, 40, 54);
+      ckPhaseCombined[i] = mkBtn(combBtns[i], QString::fromUtf8("ø"), COL_PHASE, 0, 0, 40, 16);
+      ckSolo[i] = mkBtn(combBtns[i], "SOLO", COL_SOLO, 0, 19, 40, 16);
+      ckMute[i] = mkBtn(combBtns[i], "MUTE", COL_MUTE, 0, 38, 40, 16);
       combBtns[i]->setVisible(i != 0);
-      ss->addWidget(combBtns[i]);
 
       splitBtns[i] = new QWidget(sp);
-      auto *split = hbox(splitBtns[i], 0, 0);
-      auto *lc = vbox(nullptr, 0, 3), *rc = vbox(nullptr, 0, 3);
-      ckPhase[l] = new CustomButton(splitBtns[i], QString::fromUtf8("ø"), true, QSize(40, 18), COL_GREEN);
-      ckSoloL[i] = new CustomButton(splitBtns[i], "SOLO", true, QSize(40, 18), COL_YELLOW);
-      ckMuteL[i] = new CustomButton(splitBtns[i], "MUTE", true, QSize(40, 18), COL_RED);
-      ckPhase[r] = new CustomButton(splitBtns[i], QString::fromUtf8("ø"), true, QSize(40, 18), COL_GREEN);
-      ckSoloR[i] = new CustomButton(splitBtns[i], "SOLO", true, QSize(40, 18), COL_YELLOW);
-      ckMuteR[i] = new CustomButton(splitBtns[i], "MUTE", true, QSize(40, 18), COL_RED);
-      for (auto *b : {ckPhase[l], ckSoloL[i], ckMuteL[i]})
-        lc->addWidget(b, 0, Qt::AlignHCenter);
-      for (auto *b : {ckPhase[r], ckSoloR[i], ckMuteR[i]})
-        rc->addWidget(b, 0, Qt::AlignHCenter);
-      split->addLayout(lc, 1);
-      split->addLayout(rc, 1);
+      place(splitBtns[i], 10, 218, 80, 54);
+      ckPhase[l] = mkBtn(splitBtns[i], QString::fromUtf8("ø"), COL_PHASE, 0, 0, 32, 16);
+      ckSoloL[i] = mkBtn(splitBtns[i], "SOLO", COL_SOLO, 0, 19, 32, 16);
+      ckMuteL[i] = mkBtn(splitBtns[i], "MUTE", COL_MUTE, 0, 38, 32, 16);
+      ckPhase[r] = mkBtn(splitBtns[i], QString::fromUtf8("ø"), COL_PHASE, 48, 0, 32, 16);
+      ckSoloR[i] = mkBtn(splitBtns[i], "SOLO", COL_SOLO, 48, 19, 32, 16);
+      ckMuteR[i] = mkBtn(splitBtns[i], "MUTE", COL_MUTE, 48, 38, 32, 16);
       splitBtns[i]->setVisible(i == 0);
-      ss->addWidget(splitBtns[i]);
 
-      stripsSizer->addWidget(sp, 1);
+      stripsSizer->addWidget(sp);
     }
-    mainSizer->addLayout(stripsSizer, 1);
+    stripsSizer->addStretch(1);
   }
 };
 
-// Shared layout of Loopback and Output strips: title, source combo, link,
-// linked/split faders.
+// Shared layout of Loopback and Output strips (original Loopback / Output
+// forms): title, source selector, Link, value, meters + fader at y80.
 struct BusStrip {
   QLabel *title;
   QComboBox *select;
   CustomButton *link;
   QLabel *volVal;
   FaderStrip *fader, *faderL, *faderR;
-  QVBoxLayout *layout;
   QWidget *panel;
 };
 
 static BusStrip mkBusStrip(QWidget *parent, const QString &name, int sel,
-                           int minGain, int maxGain, int faderH) {
+                           int minGain, int maxGain) {
   BusStrip s;
-  s.panel = mkStrip(parent, s.title, name, s.layout);
+  s.panel = mkStrip(parent, s.title, name, 254);
   s.select = new FlatCombo(s.panel, "flatCombo");
   s.select->addItems(OutputSels);
   s.select->setCurrentIndex(sel);
-  s.layout->addWidget(s.select);
-  s.link = new CustomButton(s.panel, "Link", true, QSize(40, 16), COL_BLUE, ICON_NONE, BTN_TEXT);
-  s.link->SetValue(true);
-  s.layout->addWidget(s.link, 0, Qt::AlignHCenter);
+  place(s.select, 0, 25, 100, 20);
+  s.link = mkLink(s.panel, 48);
   s.volVal = mkHiddenLabel(s.panel);
-  auto *faderSizer = hbox();
-  faderSizer->setContentsMargins(4, 0, 4, 4);
-  s.fader = new FaderStrip(s.panel, minGain, maxGain, true, QSize(80, faderH));
-  s.faderL = new FaderStrip(s.panel, minGain, maxGain, false, QSize(40, faderH));
-  s.faderL->SetMeterOnRight(true);
-  s.faderR = new FaderStrip(s.panel, minGain, maxGain, false, QSize(40, faderH));
-  faderSizer->addWidget(s.faderL, 1);
-  faderSizer->addWidget(s.faderR, 1);
-  faderSizer->addWidget(s.fader, 1);
+  s.fader = new FaderStrip(s.panel, minGain, maxGain, FaderStrip::FS_LINKED, 80);
+  s.faderL = new FaderStrip(s.panel, minGain, maxGain, FaderStrip::FS_LEFT, 80);
+  s.faderR = new FaderStrip(s.panel, minGain, maxGain, FaderStrip::FS_RIGHT, 80);
   s.faderL->hide();
   s.faderR->hide();
-  s.layout->addLayout(faderSizer, 1);
-  s.panel->setMinimumWidth(120);
   return s;
 }
 
-// combined MUTE + hidden split L/R MUTE pair
-static void mkMuteButtons(QWidget *parent, QVBoxLayout *layout,
-                          CustomButton *&mute, CustomButton *&muteL,
-                          CustomButton *&muteR, QWidget *&comb,
-                          QWidget *&split) {
+// MUTE 40x20 at (30,222) / split MUTE_L, MUTE_R 32x20 at x12 and x56
+static void mkMuteButtons(QWidget *parent, CustomButton *&mute,
+                          CustomButton *&muteL, CustomButton *&muteR,
+                          QWidget *&comb, QWidget *&split) {
   comb = new QWidget(parent);
-  auto *c = vbox(comb);
-  mute = new CustomButton(comb, "MUTE", true, QSize(46, 20), COL_RED);
-  c->addWidget(mute, 0, Qt::AlignHCenter);
-  layout->addWidget(comb);
+  place(comb, 30, 222, 40, 20);
+  mute = mkBtn(comb, "MUTE", COL_MUTE, 0, 0, 40, 20);
   split = new QWidget(parent);
-  auto *s = hbox(split, 0, 0);
-  muteL = new CustomButton(split, "MUTE", true, QSize(40, 20), COL_RED);
-  muteR = new CustomButton(split, "MUTE", true, QSize(40, 20), COL_RED);
-  s->addWidget(muteL, 1, Qt::AlignHCenter);
-  s->addWidget(muteR, 1, Qt::AlignHCenter);
-  layout->addWidget(split);
+  place(split, 12, 222, 76, 20);
+  muteL = mkBtn(split, "MUTE", COL_MUTE, 0, 0, 32, 20);
+  muteR = mkBtn(split, "MUTE", COL_MUTE, 44, 0, 32, 20);
   split->hide();
 }
 
@@ -1840,19 +1876,13 @@ public:
   int32_t loopLevelVal[N_LOOPBACKS * 2];
 
   PanelLoopbacks(QWidget *parent) : QWidget(parent) {
-    setBg(this, COL_SECTION);
     std::fill(std::begin(loopLevelVal), std::end(loopLevelVal), LEVEL_MIN);
-
-    auto *mainSizer = vbox(this);
-    auto *title = titleRow(this, "Loopback");
-    title->addStretch(1);
-    mainSizer->addLayout(title);
-
-    auto *stripsSizer = hbox(nullptr, 0, 8);
-    stripsSizer->setContentsMargins(8, 0, 8, 8);
+    QHBoxLayout *head;
+    auto *stripsSizer = mkSection(this, "Loopback", head);
+    head->addStretch(1);
     for (int i = 0; i < N_LOOPBACKS; ++i) {
-      BusStrip s = mkBusStrip(this, qs(std::format("Loopback {}+{}", i * 2 + 1, i * 2 + 2)),
-                              10 + i, minGain, maxGain, 150);
+      BusStrip s = mkBusStrip(this, qs(std::format("Loopback{}+{}", i * 2 + 1, i * 2 + 2)),
+                              10 + i, minGain, maxGain);
       lbTitle[i] = s.title;
       cbSelect[i] = s.select;
       btnLink[i] = s.link;
@@ -1860,11 +1890,11 @@ public:
       slOutput[i] = s.fader;
       slOutputL[i] = s.faderL;
       slOutputR[i] = s.faderR;
-      mkMuteButtons(s.panel, s.layout, ckMute[i], ckMuteL[i], ckMuteR[i],
-                    combBtns[i], splitBtns[i]);
-      stripsSizer->addWidget(s.panel, 1);
+      mkMuteButtons(s.panel, ckMute[i], ckMuteL[i], ckMuteR[i], combBtns[i],
+                    splitBtns[i]);
+      stripsSizer->addWidget(s.panel);
     }
-    mainSizer->addLayout(stripsSizer, 1);
+    stripsSizer->addStretch(1);
   }
 };
 
@@ -1913,16 +1943,10 @@ public:
   }
 
   PanelOutputs(QWidget *parent, uint16_t pid = 0x8754) : QWidget(parent) {
-    setBg(this, COL_SECTION);
     std::fill(std::begin(outLevelVal), std::end(outLevelVal), LEVEL_MIN);
-
-    auto *mainSizer = vbox(this);
-    auto *title = titleRow(this, "Output");
-    title->addStretch(1);
-    mainSizer->addLayout(title);
-
-    auto *stripsSizer = hbox(nullptr, 0, 8);
-    stripsSizer->setContentsMargins(8, 0, 8, 8);
+    QHBoxLayout *head;
+    auto *stripsSizer = mkSection(this, "Output", head);
+    head->addStretch(1);
     bool isOTG = (pid == 0x8755 || pid == 0x8756);
     int numStrips = (pid == 0x8752) ? 1 : (isOTG ? 2 : 3);
 
@@ -1930,7 +1954,7 @@ public:
       QString name = i == 0 ? "Output 1+2"
                      : i == 1 ? (isOTG ? "Mobile OUT" : "Disconnected")
                               : "S/PDIF OUT";
-      BusStrip s = mkBusStrip(this, name, 6, minGain, maxGain, 150);
+      BusStrip s = mkBusStrip(this, name, 6, minGain, maxGain);
       lbTitle[i] = s.title;
       cbSelect[i] = s.select;
       btnLink[i] = s.link;
@@ -1940,58 +1964,42 @@ public:
       slOutputR[i] = s.faderR;
 
       if (i == 0) {
-        auto *btnRow = hbox(nullptr, 0, 6);
-        btnRow->addStretch(1);
-        btnPhoneIcon[0] = new CustomButton(s.panel, "", true, QSize(30, 20), COL_BLUE, ICON_HEADPHONE);
+        // pushButton_HP / _LINEOUT (/ _AUX), rgb(66,97,192) when on
+        bool aux = pid == 0x8754 || pid == 0x8756;
+        btnPhoneIcon[0] = new CustomButton(s.panel, "", true, QSize(28, 20), COL_OUT_ON, ICON_HEADPHONE);
+        btnTRS[0] = new CustomButton(s.panel, "", true, QSize(28, 20), COL_OUT_ON, ICON_JACK);
+        place(btnPhoneIcon[0], aux ? 6 : 12, 222, aux ? 28 : 32, 20);
+        place(btnTRS[0], aux ? 36 : 56, 222, aux ? 28 : 32, 20);
         btnPhoneIcon[0]->SetValue(true);
-        btnTRS[0] = new CustomButton(s.panel, "", true, QSize(30, 20), COL_BLUE, ICON_JACK);
         btnTRS[0]->SetValue(true);
-        btnRow->addWidget(btnPhoneIcon[0]);
-        btnRow->addWidget(btnTRS[0]);
-        if (pid == 0x8754 || pid == 0x8756) {
-          btnAUX[0] = new CustomButton(s.panel, "AUX", true, QSize(30, 20), COL_BLUE);
+        if (aux) {
+          btnAUX[0] = mkBtn(s.panel, "AUX", COL_OUT_ON, 66, 222, 28, 20);
           btnAUX[0]->SetValue(true);
-          btnRow->addWidget(btnAUX[0]);
         }
-        btnRow->addStretch(1);
-        s.layout->addLayout(btnRow);
       } else {
-        mkMuteButtons(s.panel, s.layout, ckMute[i], ckMuteL[i], ckMuteR[i],
-                      combBtns[i], splitBtns[i]);
+        mkMuteButtons(s.panel, ckMute[i], ckMuteL[i], ckMuteR[i], combBtns[i],
+                      splitBtns[i]);
       }
       stripsSizer->addWidget(s.panel);
     }
-    stripsSizer->addStretch(1);
 
+    // Frame_OM1: Monitor Mix
     QLabel *monTitle;
-    QVBoxLayout *mm;
-    QWidget *monMixPanel = mkStrip(this, monTitle, "Monitor Mix", mm);
-    monMixPanel->setObjectName("monMixPanel");
-    mm->addSpacing(10);
-    mixKnob = new KnobControl(monMixPanel, "Mix", -100, 100, 0, QSize(70, 70));
-    mm->addWidget(mixKnob, 0, Qt::AlignHCenter);
-    auto *lblRow = hbox(nullptr, 0, 10);
-    lblRow->addStretch(1);
-    lblRow->addWidget(mkLabel(monMixPanel, "Input", 8.5, true, COL_TITLE));
-    lblRow->addWidget(mkLabel(monMixPanel, "Playback", 8.5, true, COL_TITLE));
-    lblRow->addStretch(1);
-    mm->addLayout(lblRow);
-    mm->addSpacing(8);
-    choicePhoneOut = new FlatCombo(monMixPanel, "boxCombo");
+    QWidget *mm = mkStrip(this, monTitle, "Monitor Mix", 254);
+    mixKnob = new KnobControl(mm, "Mix", -100, 100, 0, QSize(100, 66));
+    place(mixKnob, 0, 30, 100, 66);
+    place(mkPxLabel(mm, "Input", 10, COL_TITLE), 5, 94, 35, 25);
+    place(mkPxLabel(mm, "Playback", 10, COL_TITLE), 45, 94, 55, 25);
+    choicePhoneOut = new FlatCombo(mm, "boxCombo");
     choicePhoneOut->addItems({"Phone 1", "Phone 2"});
-    mm->addWidget(choicePhoneOut);
-    mm->addStretch(1);
-    lblMixVal = mkLabel(monMixPanel, "Level: 0dBu", 8.5, true, COL_TITLE, Qt::AlignCenter);
-    mm->addWidget(lblMixVal);
-    mm->addSpacing(10);
-    btnPhoneGain = new CustomButton(monMixPanel, "Gain", true, QSize(56, 22), COL_BLUE);
-    mm->addWidget(btnPhoneGain, 0, Qt::AlignHCenter);
-    mm->addSpacing(10);
-    monMixPanel->setFixedWidth(120);
+    place(choicePhoneOut, 0, 126, 100, 20);
+    lblMixVal = mkPxLabel(mm, "Level: 0dBu", 10, COL_TITLE);
+    place(lblMixVal, 0, 170, 100, 20);
+    btnPhoneGain = mkBtn(mm, "Gain", COL_GAIN_ON, 20, 207, 60, 20);
+    btnPhoneGain->SetFontPx(11);
     mixKnob->setEnabled(pid == 0x8754);
-    stripsSizer->addWidget(monMixPanel);
-
-    mainSizer->addLayout(stripsSizer, 1);
+    stripsSizer->addWidget(mm);
+    stripsSizer->addStretch(1);
 
     connect(choicePhoneOut, &QComboBox::activated, this, [this](int idx) {
       if (idx < 0)
@@ -2016,7 +2024,10 @@ void ScaleUIElements(QWidget *win, double scale) {
     strip->Rescale(scale);
   } else if (auto *txt = qobject_cast<QLabel *>(win)) {
     double pt = txt->property("basePt").toDouble();
-    if (pt > 0) {
+    double px = txt->property("basePx").toDouble();
+    if (px > 0) {
+      txt->setFont(uiFont(px * scale));
+    } else if (pt > 0) {
       QFont f = txt->font();
       f.setPointSizeF(pt * fontScale);
       txt->setFont(f);
@@ -2027,14 +2038,19 @@ void ScaleUIElements(QWidget *win, double scale) {
     cb->setFont(f);
   }
 
-  QString name = win->objectName();
-  if (name == "colPanel" || name == "stripPanel") {
-    win->setMinimumWidth(120 * scale);
-  } else if (name == "monMixPanel") {
-    win->setFixedWidth(120 * scale);
-  } else if (name == "headerPanel") {
-    win->setFixedHeight(44 * scale);
+  QVariant dr = win->property("dr");
+  if (dr.isValid()) {
+    QRect r = dr.toRect();
+    win->setFixedSize(r.width() * scale, r.height() * scale);
+    win->move(r.x() * scale, r.y() * scale);
   }
+  QVariant dsz = win->property("dsz");
+  if (dsz.isValid()) {
+    QSize sz = dsz.toSize();
+    win->setFixedSize(sz.width() * scale, sz.height() * scale);
+  }
+  if (win->objectName() == "headerPanel")
+    win->setFixedHeight(44 * scale);
 
   for (QObject *o : win->children()) {
     auto *child = qobject_cast<QWidget *>(o);
@@ -2079,8 +2095,9 @@ protected:
   std::thread *thReader = nullptr;
   bool closed = false;
 
-  static const int DESIGN_W = 400 + 760 + 24;
-  static const int DESIGN_H = 760;
+  // natural size at scale 1, measured once the panels exist
+  int DESIGN_W = 1010;
+  int DESIGN_H = 660;
 
   void callAfter(std::function<void()> f) {
     QMetaObject::invokeMethod(this, std::move(f), Qt::QueuedConnection);
@@ -2448,17 +2465,18 @@ TPMixer::TPMixer() : QWidget(nullptr) {
   panelLoopbacks = new PanelLoopbacks(this);
   panelOutputs = new PanelOutputs(this, hid->pid);
 
-  auto *col1 = vbox(nullptr, 0, 8);
-  col1->addWidget(panelInputs, 1);
+  // Frame_Body: splitter (handle 6) between Input/Loopback and Mixer/Output
+  auto *col1 = vbox(nullptr, 0, 0);
+  col1->addWidget(panelInputs);
   col1->addWidget(panelLoopbacks, 1);
-  auto *col2 = vbox(nullptr, 0, 8);
-  col2->addWidget(panelMixers, 1);
-  col2->addWidget(panelOutputs, 1, Qt::AlignLeft);
+  auto *col2 = vbox(nullptr, 0, 0);
+  col2->addWidget(panelMixers);
+  col2->addWidget(panelOutputs, 1);
 
-  auto *contentSizer = hbox(nullptr, 8, 8);
+  auto *contentSizer = hbox(nullptr, 0, 6);
+  contentSizer->setContentsMargins(10, 3, 10, 10);
   contentSizer->addLayout(col1);
-  contentSizer->addLayout(col2);
-  contentSizer->addStretch(1);
+  contentSizer->addLayout(col2, 1);
   mainSizer->addLayout(contentSizer, 1);
 
   btnSettings->onClick = [this](bool) { OnSettings(); };
@@ -2572,6 +2590,10 @@ TPMixer::TPMixer() : QWidget(nullptr) {
   } else if (hid->pid == 0x8752) {
     panelMixers->lbTitle[1]->setText("Unused");
   }
+
+  QSize natural = mainSizer->sizeHint();
+  DESIGN_W = natural.width();
+  DESIGN_H = natural.height();
 
   loadSettings();
   refreshInputsUi();
@@ -2964,10 +2986,6 @@ void TPMixer::HidReader(hid_device *handle) {
 }
 
 void TPMixer::RescaleUI(double scale) {
-  panelInputs->setFixedWidth(400 * scale);
-  panelLoopbacks->setFixedWidth(400 * scale);
-  panelMixers->setFixedWidth(760 * scale);
-  panelOutputs->setFixedWidth(760 * scale);
   ScaleUIElements(this, scale);
   update();
 }
@@ -3762,10 +3780,10 @@ int main(int argc, char **argv) {
   pal.setColor(QPalette::ToolTipText, QColor(220, 220, 220));
   app.setPalette(pal);
   app.setStyleSheet(R"(
-    #stripPanel, #colPanel, #monMixPanel { background: #161616; border-radius: 4px; }
-    #titleBox { background: #343434; color: #b9b9b9; border-radius: 4px; padding: 4px 2px; }
-    QComboBox QAbstractItemView { background: #262626; color: #e0e0e0;
-                                  selection-background-color: #3c5caa; border: 1px solid #3a3a3a; }
+    #stripPanel { background: #161616; border-radius: 5px; }
+    #titleBox { background: #2e2e2e; color: #a1a1a1; border-radius: 5px; }
+    QComboBox QAbstractItemView { background: #000000; color: #d8d8d8; outline: 0px;
+                                  selection-background-color: #424242; border: 1px solid #acacac; }
   )");
 
   int ret;
