@@ -1,0 +1,5 @@
+#!/bin/sh
+# exec the real binary so Qt finds usr/bin/qt.conf (a symlinked AppRun
+# makes it look for plugins in the mount root)
+HERE=$(dirname "$(readlink -f "$0")")
+exec "$HERE/usr/bin/tpmix" "$@"

@@ -33,6 +33,13 @@ tpmix is a GUI Control Program for Topping Audio Interfaces' Mixer, for Linux, m
 - push all saved status to the device
 
 
+## Install
+
+AppImage builds are attached to GitHub releases (tags `v*`). Build one locally with `packaging/appimage.sh`.
+
+Settings > "Launch at login (in tray)" adds an XDG autostart entry that starts `tpmix --tray`. Closing the window hides it to the tray; quit from the tray menu.
+
+
 ## Design
 
 ### HW Signal path

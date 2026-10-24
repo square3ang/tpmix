@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=tpmix
+Comment=Mixer control for Topping audio interfaces
+Exec=tpmix
+Icon=tpmix
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;

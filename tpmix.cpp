@@ -1372,6 +1372,53 @@ private:
 // Dialogs
 // ----------------------------------------------------------------------------
 
+// Painted app icon (window, tray): three faders on a dark tile
+static QIcon appIcon() {
+  QPixmap pm(64, 64);
+  pm.fill(Qt::transparent);
+  QPainter p(&pm);
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(0x16, 0x16, 0x16));
+  p.drawRoundedRect(QRectF(2, 2, 60, 60), 12, 12);
+  const int knobY[] = {38, 18, 28};
+  for (int i = 0; i < 3; ++i) {
+    double x = 16 + i * 16;
+    p.setBrush(QColor(0x3c, 0x3c, 0x3c));
+    p.drawRoundedRect(QRectF(x - 2, 12, 4, 40), 2, 2);
+    p.setBrush(QColor(0x30, 0x9b, 0xe8));
+    p.drawRoundedRect(QRectF(x - 7, knobY[i] - 4, 14, 8), 2, 2);
+  }
+  return QIcon(pm);
+}
+
+// XDG autostart entry; the file itself is the on/off state
+static QString autostartFile() {
+  return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) +
+         "/autostart/tpmix.desktop";
+}
+
+static void setAutostart(bool on) {
+  QString path = autostartFile();
+  if (!on) {
+    QFile::remove(path);
+    return;
+  }
+  // inside an AppImage the binary lives in a temporary mount
+  const char *appimage = getenv("APPIMAGE");
+  QString exe = appimage ? QString::fromLocal8Bit(appimage)
+                         : QCoreApplication::applicationFilePath();
+  QDir().mkpath(QFileInfo(path).path());
+  QFile f(path);
+  if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    return;
+  f.write(QString("[Desktop Entry]\nType=Application\nName=tpmix\n"
+                  "Comment=Topping mixer control\nExec=\"%1\" --tray\n"
+                  "Icon=tpmix\nTerminal=false\nX-GNOME-Autostart-enabled=true\n")
+              .arg(exe)
+              .toUtf8());
+}
+
 class SettingsDialog : public QDialog {
 public:
   SettingsDialog(QWidget *parent, uint16_t pid, ToppingHID *hid,
@@ -1396,6 +1443,10 @@ public:
                                     ? (m_hid->settings[0x9001] != 0)
                                     : true);
     leftCol->addWidget(cbSaveWorkspace);
+    auto *cbAutostart = new QCheckBox("Launch at login (in tray)", this);
+    cbAutostart->setChecked(QFile::exists(autostartFile()));
+    connect(cbAutostart, &QCheckBox::clicked, this, [](bool on) { setAutostart(on); });
+    leftCol->addWidget(cbAutostart);
     leftCol->addStretch(1);
     cols->addLayout(leftCol, 1);
 
@@ -2116,6 +2167,10 @@ protected:
 
   std::thread *thReader = nullptr;
   bool closed = false;
+  bool quitting = false;
+  QSystemTrayIcon *tray = nullptr;
+
+  void shutdown();
 
   // natural size at scale 1, measured once the panels exist
   int DESIGN_W = 1010;
@@ -2440,6 +2495,36 @@ TPMixer::TPMixer() : QWidget(nullptr) {
       deviceName = "Topping E2X2 OTG";
     setWindowTitle(qs(deviceName + " Control Center"));
   }
+  setWindowIcon(appIcon());
+
+  if (QSystemTrayIcon::isSystemTrayAvailable()) {
+    tray = new QSystemTrayIcon(appIcon(), this);
+    tray->setToolTip(windowTitle());
+    auto *menu = new QMenu(this);
+    auto showWin = [this] {
+      showNormal();
+      raise();
+      activateWindow();
+    };
+    connect(menu->addAction("Show"), &QAction::triggered, this, showWin);
+    connect(menu->addAction("Quit"), &QAction::triggered, this, [this] {
+      quitting = true;
+      qApp->quit();
+    });
+    tray->setContextMenu(menu);
+    connect(tray, &QSystemTrayIcon::activated, this,
+            [this, showWin](QSystemTrayIcon::ActivationReason r) {
+              if (r != QSystemTrayIcon::Trigger)
+                return;
+              if (isVisible())
+                hide();
+              else
+                showWin();
+            });
+    tray->show();
+  }
+  // hidden-in-tray quits (tray menu, logout) never reach closeEvent
+  connect(qApp, &QCoreApplication::aboutToQuit, this, [this] { shutdown(); });
 
   auto *mainSizer = vbox(this);
   // children shrink with the window (RescaleUI), so the layout must not
@@ -3628,17 +3713,26 @@ void TPMixer::OnPhoneGain(int32_t val) {
   hid->setPhoneGainBoost(idx, val);
 }
 
+void TPMixer::shutdown() {
+  if (closed)
+    return;
+  closed = true;
+  stopHidReader();
+  bool autoSave =
+      hid->settings.contains(0x9001) ? (hid->settings[0x9001] != 0) : true;
+  if (autoSave) {
+    saveSettings();
+  }
+}
+
 void TPMixer::closeEvent(QCloseEvent *event) {
-  if (!closed) {
-    closed = true;
-    stopHidReader();
-    bool autoSave =
-        hid->settings.contains(0x9001) ? (hid->settings[0x9001] != 0) : true;
-    if (autoSave) {
-      saveSettings();
-    }
+  if (tray && !quitting) {
+    hide();
+    event->ignore();
+    return;
   }
   QWidget::closeEvent(event);
+  qApp->quit();
 }
 
 void TPMixer::OnLoad() {
@@ -3813,10 +3907,16 @@ int main(int argc, char **argv) {
                                   selection-background-color: #424242; border: 1px solid #acacac; }
   )");
 
+  // the window may be hidden in the tray; quit only via closeEvent/tray menu
+  app.setQuitOnLastWindowClosed(false);
+  bool startInTray = app.arguments().contains("--tray") &&
+                     QSystemTrayIcon::isSystemTrayAvailable();
+
   int ret;
   {
     TPMixer frame;
-    frame.show();
+    if (!startInTray)
+      frame.show();
     ret = app.exec();
   }
   hid_exit();
