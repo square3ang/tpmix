@@ -597,7 +597,7 @@ static QLabel *mkPxLabel(QWidget *parent, const QString &text, double px,
 // "Input |" section heading
 static QHBoxLayout *titleRow(QWidget *parent, const QString &title) {
   auto *row = hbox(nullptr, 0, 10);
-  row->setContentsMargins(10, 4, 0, 4);
+  row->setContentsMargins(10, 3, 0, 3);
   QLabel *l = mkPxLabel(parent, title, 14, COL_TITLE, Qt::AlignLeft | Qt::AlignVCenter);
   l->setProperty("dsz", QSize(70, 22));
   l->setFixedSize(70 * g_uiScale, 22 * g_uiScale);
@@ -899,7 +899,7 @@ protected:
     const double start = 45, span = 270;
     double range = m_max - m_min;
     double valDeg = span * (m_val - m_min) / range;
-    double midDeg = span / 2.0;
+    double zeroDeg = span * (std::clamp(0, m_min, m_max) - m_min) / range;
     bool atMid = m_bipolar && m_val * 2 == m_max + m_min;
 
     // 1. ticks
@@ -910,11 +910,9 @@ protected:
     tp.setCapStyle(Qt::FlatCap);
     for (int i = 0; i <= ticks; ++i) {
       double deg = span * i / ticks;
-      bool lit = m_bipolar ? (deg >= std::min(valDeg, midDeg) - 0.01 &&
-                              deg <= std::max(valDeg, midDeg) + 0.01)
-                           : deg <= valDeg + 0.01;
-      if (atMid)
-        lit = i == ticks / 2;
+      bool lit = std::abs(valDeg - zeroDeg) > 0.01 &&
+                 deg >= std::min(valDeg, zeroDeg) - 0.01 &&
+                 deg <= std::max(valDeg, zeroDeg) + 0.01;
       tp.setColor(lit ? tickOn : tickOff);
       p.setPen(tp);
       p.drawLine(QPointF(0, 85), QPointF(0, 95));
@@ -1015,9 +1013,24 @@ protected:
       p.setBrush(Qt::NoBrush);
       p.drawRoundedRect(r.adjusted(bw / 2, bw / 2, -bw / 2, -bw / 2), 5, 5);
     }
-    p.setFont(uiFont((box ? 11 : 12) * g_uiScale));
+    p.setFont(uiFont((box ? 12 : 12) * g_uiScale));
     p.setPen(box ? COL_TITLE : COL_TEXT);
-    p.drawText(r, Qt::AlignCenter, currentText());
+    if (box) {
+      p.drawText(r, Qt::AlignCenter, currentText());
+      return;
+    }
+    QFontMetricsF fm(p.font());
+    double a = 4 * g_uiScale, gap = 4 * g_uiScale;
+    double tw = fm.horizontalAdvance(currentText());
+    double x0 = r.center().x() - (tw + gap + 2 * a) / 2;
+    p.drawText(QRectF(x0, r.y(), tw + 1, r.height()), Qt::AlignVCenter, currentText());
+    double ax = x0 + tw + gap, cy = r.center().y();
+    QPolygonF arrow;
+    arrow << QPointF(ax, cy - a * 0.5) << QPointF(ax + 2 * a, cy - a * 0.5)
+          << QPointF(ax + a, cy + a * 0.6);
+    p.setPen(Qt::NoPen);
+    p.setBrush(COL_TEXT);
+    p.drawPolygon(arrow);
   }
 };
 
@@ -1157,25 +1170,30 @@ protected:
     g.setColorAt(0.15, QColor(0xa7, 0x7d, 0x43));
     g.setColorAt(0.3, QColor(0x0f, 0x96, 0x40));
     g.setColorAt(1, QColor(0x00, 0x96, 0x41));
+    // paint only the lit part; covering a full gradient left an AA fringe
     p.setPen(Qt::NoPen);
-    p.setBrush(g);
+    p.setBrush(COL_METER_BG);
     p.drawRoundedRect(r, 1, 1);
     double f = level <= -600 ? 1.0 : taperFrac(level / 10.0, 0);
-    p.setBrush(COL_METER_BG);
-    p.drawRect(QRectF(r.x(), r.y(), r.width(), r.height() * f));
+    p.setBrush(g);
+    p.drawRect(QRectF(r.x(), r.y() + r.height() * f, r.width(), r.height() * (1 - f)));
     if (clipLed) {
       p.setBrush(level >= -10 ? COL_CLIP : COL_METER_BG);
       p.drawRoundedRect(QRectF(r.x(), r.y() - 6, r.width(), clipH), 1, 1);
     }
   }
 
+  // number with a short dash under it (original label_kedu* rows)
   void drawScale(QPainter &p, double x, double w, Qt::Alignment align) {
     p.setFont(uiFont(8));
-    p.setPen(COL_SCALE);
     for (int db : {0, -6, -12, -24, -60}) {
       double y = m_meterTop + HANDLE / 2 + taperFrac(db, m_max) * (TRAVEL - HANDLE);
-      p.drawText(QRectF(x, y - 6, w, 12), align | Qt::AlignVCenter,
-                 db == 0 ? "-0" : QString::number(db));
+      p.setPen(COL_SCALE);
+      p.drawText(QRectF(x, y - 8, w, 11), align | Qt::AlignVCenter,
+                 db == 0 ? "-0" : db == -60 ? QString::fromUtf8("-∞") : QString::number(db));
+      double lx = align & Qt::AlignRight ? x + w - 8 : x;
+      p.setPen(QPen(COL_SCALE, 1));
+      p.drawLine(QPointF(lx, y + 3.5), QPointF(lx + 8, y + 3.5));
     }
   }
 
@@ -1234,11 +1252,15 @@ protected:
       for (int db : {0, -6, -12, -24, -36, -60}) {
         double y = 50 + 134 * inputFrac(db);
         QString t = db == 0 ? "0" : QString::number(db);
+        p.setPen(QPen(COL_SCALE, 1));
         if (both) {
-          p.drawText(QRectF(2, y - 6, 16, 12), Qt::AlignRight | Qt::AlignVCenter, t);
-          p.drawText(QRectF(82, y - 6, 18, 12), Qt::AlignLeft | Qt::AlignVCenter, t);
+          p.drawText(QRectF(0, y - 6, 14, 12), Qt::AlignRight | Qt::AlignVCenter, t);
+          p.drawLine(QPointF(14, y), QPointF(18, y));
+          p.drawLine(QPointF(82, y), QPointF(86, y));
+          p.drawText(QRectF(87, y - 6, 14, 12), Qt::AlignLeft | Qt::AlignVCenter, t);
         } else {
-          p.drawText(QRectF(32, y - 6, 24, 12), Qt::AlignLeft | Qt::AlignVCenter, t);
+          p.drawLine(QPointF(33, y), QPointF(37, y));
+          p.drawText(QRectF(40, y - 6, 20, 12), Qt::AlignLeft | Qt::AlignVCenter, t);
         }
       }
       return;
@@ -1285,7 +1307,7 @@ protected:
     p.setBrush(COL_TRACK);
     p.drawRoundedRect(QRectF(groove.x(), yv, groove.width(), groove.bottom() - yv), 2, 2);
     p.setBrush(hasFocus() ? QColor(240, 240, 240) : COL_HANDLE);
-    p.drawRoundedRect(QRectF(groove.x() - 6, yv - HANDLE / 2, groove.width() + 12, HANDLE), 3, 3);
+    p.drawRoundedRect(QRectF(fx, yv - HANDLE / 2, fw, HANDLE), 2, 2);
   }
 
   QPointF toDesign(QPointF pos) const {
@@ -1539,7 +1561,7 @@ static QWidget *mkStrip(QWidget *parent, QLabel *&title, const QString &name,
   strip->setAttribute(Qt::WA_StyledBackground);
   strip->setProperty("dsz", QSize(100, height));
   strip->setFixedSize(100 * g_uiScale, height * g_uiScale);
-  title = mkPxLabel(strip, name, 11, COL_TITLE);
+  title = mkPxLabel(strip, name, 12, COL_TITLE);
   title->setObjectName("titleBox");
   place(title, 0, 0, 100, 20);
   return strip;
@@ -1560,7 +1582,7 @@ static QHBoxLayout *mkSection(QWidget *w, const QString &title,
   head = titleRow(w, title);
   mainSizer->addLayout(head);
   auto *strips = hbox(nullptr, 0, 8);
-  strips->setContentsMargins(6, 0, 6, 10);
+  strips->setContentsMargins(6, 0, 6, 4);
   mainSizer->addLayout(strips, 1);
   return strips;
 }
@@ -1645,7 +1667,7 @@ public:
         cbSolo[col] = mkBtn(sp, "SOLO", COL_SOLO, 60, 116, 30, 16);
         cbMute[col] = mkBtn(sp, "MUTE", COL_MUTE, 60, 136, 30, 16);
         cbPhase[col] = mkBtn(sp, QString::fromUtf8("ø"), COL_PHASE, 60, 156, 30, 16);
-        auto *knob = new KnobControl(sp, "Gain", minGain, maxGain, 0, QSize(64, 80), true);
+        auto *knob = new KnobControl(sp, "Gain", 0, maxGain, 0, QSize(64, 80), true);
         knob->SetRingWidth(5);
         place(knob, 18, 192, 64, 80);
         slGainI[col]->AttachKnob(knob);
@@ -1676,9 +1698,9 @@ public:
         cbMuteR = mkBtn(splitBtns, "M", COL_MUTE, 17, 20, 15, 16);
         cbPhaseR = mkBtn(splitBtns, QString::fromUtf8("ø"), COL_PHASE, 17, 40, 15, 16);
 
-        auto *knobC = new KnobControl(sp, "Gain", minGain, maxGain, 0, QSize(64, 80), true);
-        auto *knobL = new KnobControl(sp, "Gain", minGain, maxGain, 0, QSize(46, 62), true);
-        auto *knobR = new KnobControl(sp, "Gain", minGain, maxGain, 0, QSize(46, 62), true);
+        auto *knobC = new KnobControl(sp, "Gain", 0, maxGain, 0, QSize(64, 80), true);
+        auto *knobL = new KnobControl(sp, "Gain", 0, maxGain, 0, QSize(46, 62), true);
+        auto *knobR = new KnobControl(sp, "Gain", 0, maxGain, 0, QSize(46, 62), true);
         for (auto *k : {knobC, knobL, knobR})
           k->SetRingWidth(5);
         place(knobC, 18, 192, 64, 80);
@@ -1998,8 +2020,8 @@ public:
     btnPhoneGain = mkBtn(mm, "Gain", COL_GAIN_ON, 20, 207, 60, 20);
     btnPhoneGain->SetFontPx(11);
     mixKnob->setEnabled(pid == 0x8754);
-    stripsSizer->addWidget(mm);
     stripsSizer->addStretch(1);
+    stripsSizer->addWidget(mm);
 
     connect(choicePhoneOut, &QComboBox::activated, this, [this](int idx) {
       if (idx < 0)
@@ -2466,10 +2488,10 @@ TPMixer::TPMixer() : QWidget(nullptr) {
   panelOutputs = new PanelOutputs(this, hid->pid);
 
   // Frame_Body: splitter (handle 6) between Input/Loopback and Mixer/Output
-  auto *col1 = vbox(nullptr, 0, 0);
+  auto *col1 = vbox(nullptr, 0, 6);
   col1->addWidget(panelInputs);
   col1->addWidget(panelLoopbacks, 1);
-  auto *col2 = vbox(nullptr, 0, 0);
+  auto *col2 = vbox(nullptr, 0, 6);
   col2->addWidget(panelMixers);
   col2->addWidget(panelOutputs, 1);
 
@@ -2591,9 +2613,11 @@ TPMixer::TPMixer() : QWidget(nullptr) {
     panelMixers->lbTitle[1]->setText("Unused");
   }
 
+  // original MainWindow_* sizes; grow only if the content needs more
   QSize natural = mainSizer->sizeHint();
-  DESIGN_W = natural.width();
-  DESIGN_H = natural.height();
+  int origW = hid->pid == 0x8754 ? 1122 : hid->pid == 0x8752 ? 880 : 1010;
+  DESIGN_W = std::max(origW, natural.width());
+  DESIGN_H = std::max(660, natural.height());
 
   loadSettings();
   refreshInputsUi();
@@ -2721,6 +2745,9 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
       if (mixCh >= 4)
         break;
       panelMixers->mixLevelVal[mixCh] = level01DB;
+      // E1X2 OTG mono mic feeds both sides of the "Analog IN" strip
+      if (hid->pid == 0x8755 && mixCh == 0)
+        panelMixers->mixLevelVal[1] = level01DB;
       int strip = mixCh / 2;
       bool mixLinked = panelMixers->btnLink[strip]->GetValue();
       if (mixLinked) {
