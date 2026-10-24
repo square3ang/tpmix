@@ -1,12 +1,16 @@
 # tpmix
 
+A fork of tpmix for the Topping E1X2 OTG, E2X2 and E2X2 OTG (original: https://gitlab.com/terrance_m/tpmix).
+
 tpmix is a GUI Control Program for Topping Audio Interfaces' Mixer, for Linux, maybe MacOS X. Please do not file tickets for windoze.
 
 
 ## Supported HW
 
 - Topping E4X4 (152a:8754), tested
-- E2x2, HID tags are quite different, wip
+- Topping E2X2 OTG (152a:8756)
+- Topping E1X2 OTG (152a:8755)
+- Topping E2X2 (152a:8752), HID tags are quite different, wip
 - Larger devices support is possible, please capture the HID interaction, see [topping.e4x4.hid.md]
 
 
@@ -20,6 +24,8 @@ tpmix is a GUI Control Program for Topping Audio Interfaces' Mixer, for Linux, m
 - All level meters. Inputs, Playbacks, Loopbacks input and output, Outputs input and output
 - Gain step can be finer than 1dB, it's digital, (linearly) can be almost any value between (-64.0,-64.0)
 - manual load/save, and save to device
+- Qt 6 UI laid out and styled after the official TOPPING Professional Control Center
+- System tray icon, optional launch at login (in tray)
 
 ### Works not
 
@@ -35,9 +41,39 @@ tpmix is a GUI Control Program for Topping Audio Interfaces' Mixer, for Linux, m
 
 ## Install
 
-AppImage builds are attached to GitHub releases (tags `v*`). Build one locally with `packaging/appimage.sh`.
+### AppImage
 
-Settings > "Launch at login (in tray)" adds an XDG autostart entry that starts `tpmix --tray`. Closing the window hides it to the tray; quit from the tray menu.
+Download `tpmix-x86_64.AppImage` from [Releases](https://github.com/square3ang/tpmix/releases), then:
+
+```
+chmod +x tpmix-x86_64.AppImage
+./tpmix-x86_64.AppImage
+```
+
+The AppImage is built on Ubuntu 24.04, so it needs glibc 2.39 or later. Build one yourself with `packaging/appimage.sh`.
+
+### From source
+
+```
+make
+./tpmix
+```
+
+### Device access
+
+tpmix talks to the device over `/dev/hidraw*`. To use it without root, add a udev rule, e.g. `/etc/udev/rules.d/70-topping.rules`:
+
+```
+KERNEL=="hidraw*", ATTRS{idVendor}=="152a", TAG+="uaccess"
+```
+
+Then run `sudo udevadm control --reload && sudo udevadm trigger` and replug the device.
+
+### Tray and autostart
+
+- Closing the window hides it to the tray; quit from the tray menu.
+- `tpmix --tray` starts hidden in the tray.
+- Settings > "Launch at login (in tray)" adds `~/.config/autostart/tpmix.desktop`, which runs `tpmix --tray`.
 
 
 ## Design
@@ -83,9 +119,9 @@ Notes:
 
 ###  SW deps
 
-- Qt 6 (Widgets), tested with Qt 6.12
+- Qt 6 (Widgets), Qt 6.4 or later, tested with Qt 6.12
 - HIDAPI 0.14 or later (older might also work)
-- g++ 14.2, with C++20 features, (older might also work)
+- g++ 13 or later (C++20 `std::format`)
 
 
 ### `toppingmixer.settings`
@@ -115,12 +151,10 @@ Example:
 
 ## Known issues:
 
-1. **segmentation fault** when exit, due to unknown string free violation of `PanelOutputs` class. wxWidgets related
-2. **Mute** is saved, but Gain/Volume is not saved if muted.
-3. **Solo** status is not saved. because Solo is actually muting other channels.
-4. udev rules for hidraw does not support VID:PID, so, manually chmod/chown the hidraw device, or assign your group for all hidraw dev (kind of unsafe)
-5. Not really an issue, if HID device open failed, there will be a demo mode, just some flashing level meters, and pan/gain/volume will be remembered.
-6. occasionally crash when open, debugging
+1. **Mute** is saved, but Gain/Volume is not saved if muted.
+2. **Solo** status is not saved. because Solo is actually muting other channels.
+3. Not really an issue, if HID device open failed, there will be a demo mode, just some flashing level meters, and pan/gain/volume will be remembered.
+4. occasionally crash when open, debugging
 
 ## License
 
