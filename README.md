@@ -76,7 +76,7 @@ Notes:
 
 ###  SW deps
 
-- wxWidgets 3.2 or later, tested with wx3.2  (older might also work)
+- Qt 6 (Widgets), tested with Qt 6.12
 - HIDAPI 0.14 or later (older might also work)
 - g++ 14.2, with C++20 features, (older might also work)
 
