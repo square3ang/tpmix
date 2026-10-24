@@ -7,10 +7,10 @@ tpmix is a GUI Control Program for Topping Audio Interfaces' Mixer, for Linux, m
 
 ## Supported HW
 
-- Topping E4X4 (152a:8754), tested
-- Topping E2X2 OTG (152a:8756)
-- Topping E1X2 OTG (152a:8755)
-- Topping E2X2 (152a:8752), HID tags are quite different, wip
+- Topping E1X2 OTG (152a:8755), tested
+- Topping E2X2 OTG (152a:8756), tested
+- Topping E4X4 (152a:8754), untested
+- Topping E2X2 (152a:8752), untested
 - Larger devices support is possible, please capture the HID interaction, see [topping.e4x4.hid.md]
 
 
