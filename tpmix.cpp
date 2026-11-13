@@ -2734,24 +2734,30 @@ static int getLogicInputChannel(uint8_t hidCh, uint16_t pid) {
   return hidCh - 0x21;
 }
 
+static bool isMeterKey(uint16_t ch16) {
+  uint8_t ch = ch16 >> 8;
+  uint8_t subCh = ch16 & 0xff;
+  uint8_t cls = ch & 0xf0;
+  if (cls == 0x40)
+    return true;
+  if (cls == 0x20 && subCh == 0x04)
+    return true;
+  if (cls == 0x30 && ch >= 0x31 && ch <= 0x34 &&
+      (subCh == 0x01 || subCh == 0x02))
+    return true;
+  if (cls == 0x50 && ch >= 0x51 && ch <= 0x56 &&
+      (subCh == 0x01 || subCh == 0x02))
+    return true;
+  return false;
+}
+
 void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
   uint8_t ch = ch16 >> 8;
   uint8_t subCh = ch16 & 0xff;
   int32_t level01DB = val;
   int32_t cls = ch & 0xf0;
 
-  bool isLevelMeter = false;
-  if (cls == 0x40) {
-    isLevelMeter = true;
-  } else if (cls == 0x20 && subCh == 0x04) {
-    isLevelMeter = true;
-  } else if (cls == 0x30 && (ch - 0x31) < 10 && (subCh == 0x01 || subCh == 0x02)) {
-    isLevelMeter = true;
-  } else if (cls == 0x50 && (subCh == 0x01 || subCh == 0x02)) {
-    isLevelMeter = true;
-  }
-
-  if (!isLevelMeter) {
+  if (!isMeterKey(ch16)) {
     hid->settings[ch16] = val;
   }
 
@@ -3143,7 +3149,7 @@ bool TPMixer::loadSettings() {
       continue;
     if (key == 0x9999) {
       g_uiScale = std::clamp((double)value / 100.0, 0.5, 3.0);
-    } else {
+    } else if (!isMeterKey(key)) {
       hid->settings[key] = value;
       callAfter([this, key, value] { scbUpdateLevels(key, value); });
     }
