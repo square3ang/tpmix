@@ -2964,7 +2964,8 @@ void TPMixer::scbUpdateLevels(uint16_t ch16, int32_t val) {
         hid->settings[0x3705] = val;
       }
     } else {
-      if (logicCh < 6 && subCh == 1) {
+      // Output strips (0x31..0x34) report pre-fader L/R levels on subCh == 2
+      if (logicCh < 6 && subCh == 2) {
         panelOutputs->outLevelVal[logicCh] = level01DB;
         int strip = logicCh / 2;
         bool outLinked = panelOutputs->btnLink[strip]
